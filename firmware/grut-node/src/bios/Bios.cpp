@@ -1,5 +1,6 @@
 #include "bios/Bios.h"
 
+#include "CommandParser.h"
 #include "bios/Diagnostics.h"
 
 namespace grut {
@@ -67,20 +68,23 @@ void Bios::handleConsoleLine(const String& rawLine) {
   line.trim();
   line.toLowerCase();
 
-  if (line.length() == 0) {
-    return;
-  }
-
-  if (line == "help" || line == "?") {
-    printHelp();
-  } else if (line == "status") {
-    printStatus();
-  } else if (line == "reboot") {
-    reboot();
-  } else {
-    Serial.print(F("unknown command: "));
-    Serial.println(line);
-    Serial.println(F("type 'help' for a list of commands"));
+  switch (parseCommandLine(std::string(line.c_str()))) {
+    case Command::kEmpty:
+      return;
+    case Command::kHelp:
+      printHelp();
+      return;
+    case Command::kStatus:
+      printStatus();
+      return;
+    case Command::kReboot:
+      reboot();
+      return;
+    case Command::kUnknown:
+      Serial.print(F("unknown command: "));
+      Serial.println(line);
+      Serial.println(F("type 'help' for a list of commands"));
+      return;
   }
 }
 

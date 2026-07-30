@@ -1,6 +1,7 @@
 #include "bios/Diagnostics.h"
 
 #include <Arduino.h>
+#include <ESP8266WiFi.h>
 
 namespace grut {
 namespace bios {
@@ -14,6 +15,9 @@ void runStartupReport() {
 
   Serial.print(F("chip_id=0x"));
   Serial.println(ESP.getChipId(), HEX);
+
+  Serial.print(F("mac_address="));
+  Serial.println(WiFi.macAddress());
 
   Serial.print(F("flash_id=0x"));
   Serial.println(ESP.getFlashChipId(), HEX);

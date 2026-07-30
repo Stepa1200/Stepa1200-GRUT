@@ -83,6 +83,20 @@ pio device monitor --port COM5 --baud 57600
 Вихід з монітора: `Ctrl+C`, потім `Ctrl+]` за потреби (залежно від
 версії PlatformIO — зазвичай досить `Ctrl+C`).
 
+## Тести (host-side, без плати)
+
+Логіка розбору консольних команд (`help`/`status`/`reboot`) винесена в
+`lib/bios_command_parser` без залежності від Arduino/ESP8266, тому її
+можна перевірити прямо на ПК, без прошивання плати:
+
+```powershell
+pio test -e native
+```
+
+Успішний запуск покаже `PASSED` для 6 тестів (розпізнавання кожної
+команди, регістронезалежність, обрізання пробілів, порожній рядок,
+відхилення невідомих команд типу `role air`/`mesh`).
+
 ## Очищення збірки (за потреби)
 
 ```powershell
@@ -103,7 +117,7 @@ pio run --target clean
 
 ```
 firmware/grut-node/
-├── platformio.ini
+├── platformio.ini              — env:esp8285 (плата) + env:native (тести)
 ├── include/
 │   ├── bios/
 │   │   ├── Bios.h            — клас BIOS (boot, консоль, статус)
@@ -111,6 +125,10 @@ firmware/grut-node/
 │   └── transport/
 │       ├── ITransport.h      — інтерфейс Transport (кордон BIOS/Transport)
 │       └── StubTransport.h   — заглушка (Transport відключений)
+├── lib/
+│   └── bios_command_parser/  — чиста логіка розбору команд, без Arduino
+│       ├── CommandParser.h
+│       └── CommandParser.cpp
 ├── src/
 │   ├── main.cpp
 │   ├── bios/
@@ -118,6 +136,9 @@ firmware/grut-node/
 │   │   └── Diagnostics.cpp
 │   └── transport/
 │       └── StubTransport.cpp
+├── test/
+│   └── test_command_parser/
+│       └── test_main.cpp     — host-side Unity-тести (pio test -e native)
 └── README_UA.md
 ```
 
