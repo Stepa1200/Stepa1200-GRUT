@@ -1,14 +1,16 @@
 #include <Arduino.h>
 
+#include "RuntimeManager.h"
 #include "bios/Bios.h"
 #include "bios/UartConsole.h"
-#include "transport/StubTransport.h"
+#include "transport/UartTransport.h"
 
 namespace {
 
 grut::bios::UartConsole gConsole;
-grut::transport::StubTransport gTransport;
-grut::bios::Bios gBios(gConsole, gTransport);
+grut::transport::UartTransport gTransport;
+grut::bios::RuntimeManager gRuntimeManager(gConsole, gTransport);
+grut::bios::Bios gBios(gConsole, gTransport, gRuntimeManager);
 
 }  // namespace
 

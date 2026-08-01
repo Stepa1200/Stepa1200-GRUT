@@ -52,6 +52,27 @@ void test_unknown_commands_are_rejected() {
                      static_cast<int>(parseCommandLine("wifi")));
 }
 
+void test_transport_subcommands() {
+  TEST_ASSERT_EQUAL(static_cast<int>(Command::kTransportStatus),
+                     static_cast<int>(parseCommandLine("transport status")));
+  TEST_ASSERT_EQUAL(static_cast<int>(Command::kTransportStart),
+                     static_cast<int>(parseCommandLine("transport start")));
+  TEST_ASSERT_EQUAL(static_cast<int>(Command::kTransportStop),
+                     static_cast<int>(parseCommandLine("transport stop")));
+}
+
+void test_transport_subcommands_are_case_insensitive_and_trim() {
+  TEST_ASSERT_EQUAL(static_cast<int>(Command::kTransportStart),
+                     static_cast<int>(parseCommandLine("  TRANSPORT START  ")));
+}
+
+void test_incomplete_or_unknown_transport_commands_are_rejected() {
+  TEST_ASSERT_EQUAL(static_cast<int>(Command::kUnknown),
+                     static_cast<int>(parseCommandLine("transport")));
+  TEST_ASSERT_EQUAL(static_cast<int>(Command::kUnknown),
+                     static_cast<int>(parseCommandLine("transport enable")));
+}
+
 int main(int argc, char** argv) {
   UNITY_BEGIN();
   RUN_TEST(test_help_command);
@@ -60,5 +81,8 @@ int main(int argc, char** argv) {
   RUN_TEST(test_reboot_command);
   RUN_TEST(test_empty_line_is_ignored);
   RUN_TEST(test_unknown_commands_are_rejected);
+  RUN_TEST(test_transport_subcommands);
+  RUN_TEST(test_transport_subcommands_are_case_insensitive_and_trim);
+  RUN_TEST(test_incomplete_or_unknown_transport_commands_are_rejected);
   return UNITY_END();
 }

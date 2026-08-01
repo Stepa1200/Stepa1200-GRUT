@@ -3,16 +3,20 @@
 namespace grut {
 namespace transport {
 
-void StubTransport::begin() {
-  // Intentionally does nothing: v0.1 ships with no active transport.
+bool StubTransport::start() {
+  return false;  // intentionally never starts
+}
+
+void StubTransport::stop() {
+  // Intentionally does nothing.
+}
+
+bool StubTransport::isRunning() const {
+  return false;
 }
 
 void StubTransport::poll() {
   // Intentionally does nothing.
-}
-
-bool StubTransport::isEnabled() const {
-  return false;
 }
 
 bool StubTransport::send(const uint8_t* /*data*/, size_t /*length*/) {

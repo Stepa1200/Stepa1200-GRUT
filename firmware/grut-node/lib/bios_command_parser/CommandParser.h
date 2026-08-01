@@ -9,6 +9,9 @@ enum class Command {
   kHelp,
   kStatus,
   kReboot,
+  kTransportStatus,
+  kTransportStart,
+  kTransportStop,
   kEmpty,
   kUnknown,
 };

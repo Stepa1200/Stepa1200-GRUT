@@ -24,23 +24,28 @@ void writeLine(IConsole& console, const char* text) {
 
 }  // namespace
 
-Bios::Bios(IConsole& consoleRef, transport::ITransport& transportRef)
-    : console_(consoleRef), transport_(transportRef) {}
+Bios::Bios(IConsole& consoleRef, transport::ITransport& transportRef,
+           RuntimeManager& runtimeManagerRef)
+    : console_(consoleRef),
+      transport_(transportRef),
+      runtimeManager_(runtimeManagerRef) {}
 
 void Bios::begin() {
-  console_.begin();
+  console_.start();
 
   bootMillis_ = millis();
 
   diagnostics::runStartupReport(console_);
 
-  transport_.begin();
-
+  // Transport is intentionally NOT started here. It stays stopped until
+  // RuntimeManager::enableTransport() is called - starting it
+  // unconditionally at boot would race the console for the same
+  // physical UART.
   char lineBuf[64];
-  snprintf(lineBuf, sizeof(lineBuf), "transport=%s", transport_.name());
+  snprintf(lineBuf, sizeof(lineBuf), "transport_name=%s", transport_.name());
   writeLine(console_, lineBuf);
-  writeLine(console_, transport_.isEnabled() ? "transport_enabled=yes"
-                                              : "transport_enabled=no");
+  writeLine(console_,
+            transport_.isRunning() ? "transport=running" : "transport=stopped");
 
   writeLine(console_, "");
   snprintf(lineBuf, sizeof(lineBuf), "GRUT BIOS v%s", kBiosVersion);
@@ -52,6 +57,10 @@ void Bios::begin() {
 void Bios::loop() {
   transport_.poll();
 
+  // While the console is stopped (Transport active), available() always
+  // returns 0 (see UartConsole), so this loop naturally does nothing and
+  // BIOS writes zero bytes to the physical UART - no extra "is transport
+  // active?" branching needed here.
   while (console_.available() > 0) {
     const int value = console_.read();
     if (value < 0) {
@@ -124,6 +133,15 @@ void Bios::handleConsoleLine(const char* rawLine) {
     case Command::kReboot:
       reboot();
       return;
+    case Command::kTransportStatus:
+      printTransportStatus();
+      return;
+    case Command::kTransportStart:
+      handleTransportStart();
+      return;
+    case Command::kTransportStop:
+      handleTransportStop();
+      return;
     case Command::kUnknown: {
       char buf[128];
       snprintf(buf, sizeof(buf), "unknown command: %s", line);
@@ -136,9 +154,12 @@ void Bios::handleConsoleLine(const char* rawLine) {
 
 void Bios::printHelp() {
   writeLine(console_, "Available commands:");
-  writeLine(console_, "  help    - show this message");
-  writeLine(console_, "  status  - show BIOS/transport status");
-  writeLine(console_, "  reboot  - restart the device");
+  writeLine(console_, "  help             - show this message");
+  writeLine(console_, "  status           - show BIOS/transport status");
+  writeLine(console_, "  reboot           - restart the device");
+  writeLine(console_, "  transport status - show console/transport state only");
+  writeLine(console_, "  transport start  - hand UART to Transport (console goes mute)");
+  writeLine(console_, "  transport stop   - return UART to the console");
 }
 
 void Bios::printStatus() {
@@ -154,18 +175,54 @@ void Bios::printStatus() {
   writeLine(console_, buf);
 
   snprintf(buf, sizeof(buf), "uart_baud=%lu",
-            static_cast<unsigned long>(kUartBaud));
+            static_cast<unsigned long>(grut::kPhysicalUartBaud));
   writeLine(console_, buf);
 
   snprintf(buf, sizeof(buf), "free_heap_bytes=%lu",
             static_cast<unsigned long>(ESP.getFreeHeap()));
   writeLine(console_, buf);
 
-  snprintf(buf, sizeof(buf), "transport=%s", transport_.name());
+  writeLine(console_,
+            console_.isRunning() ? "console=running" : "console=stopped");
+
+  snprintf(buf, sizeof(buf), "transport_name=%s", transport_.name());
   writeLine(console_, buf);
 
-  writeLine(console_, transport_.isEnabled() ? "transport_enabled=yes"
-                                              : "transport_enabled=no");
+  writeLine(console_, transport_.isRunning() ? "transport=running"
+                                              : "transport=stopped");
+}
+
+void Bios::printTransportStatus() {
+  // Read-only: never changes ownership, just reports current state.
+  writeLine(console_,
+            console_.isRunning() ? "console=running" : "console=stopped");
+  writeLine(console_, transport_.isRunning() ? "transport=running"
+                                              : "transport=stopped");
+}
+
+void Bios::handleTransportStart() {
+  // RuntimeManager::enableTransport() stops the console before starting
+  // Transport. If it succeeds, console_.write() below (and everywhere
+  // else in BIOS) becomes a silent no-op - see IConsole/UartConsole -
+  // so BIOS structurally writes no further bytes to Serial, without any
+  // extra "is transport active?" branching here.
+  if (!runtimeManager_.enableTransport()) {
+    // Rollback already happened inside enableTransport(): the console
+    // was restarted, so this write reaches the console normally.
+    writeLine(console_, "transport_start=failed");
+    writeLine(console_, "console=running");
+  }
+}
+
+void Bios::handleTransportStop() {
+  // RuntimeManager::disableTransport() stops Transport, then starts the
+  // console - by the time it returns, the console already owns Serial
+  // again, so this confirmation is only ever printed after that handoff
+  // completed.
+  runtimeManager_.disableTransport();
+  writeLine(console_, "transport_stop=ok");
+  writeLine(console_,
+            console_.isRunning() ? "console=running" : "console=stopped");
 }
 
 void Bios::reboot() {

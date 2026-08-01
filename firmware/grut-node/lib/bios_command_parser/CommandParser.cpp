@@ -47,6 +47,15 @@ Command parseCommandLine(const std::string& rawLine) {
   if (line == "reboot") {
     return Command::kReboot;
   }
+  if (line == "transport status") {
+    return Command::kTransportStatus;
+  }
+  if (line == "transport start") {
+    return Command::kTransportStart;
+  }
+  if (line == "transport stop") {
+    return Command::kTransportStop;
+  }
   return Command::kUnknown;
 }
 
