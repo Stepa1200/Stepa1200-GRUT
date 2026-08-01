@@ -176,3 +176,11 @@ Transport must not print uncontrolled text into MAVLink UART.
 
 \- Do not delete working code without explanation.
 
+
+## Console / Transport ownership rules
+
+1. UART belongs to Transport.
+2. BIOS never writes to the physical UART while Transport is active.
+3. The BIOS console works through an abstract interface (`IConsole`).
+4. The primary way to interact with BIOS is through GRUT Desktop; the TCP
+   console remains a fallback debug interface for use without a GUI.

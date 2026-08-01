@@ -120,8 +120,10 @@ firmware/grut-node/
 ├── platformio.ini              — env:esp8285 (плата) + env:native (тести)
 ├── include/
 │   ├── bios/
-│   │   ├── Bios.h            — клас BIOS (boot, консоль, статус)
-│   │   └── Diagnostics.h     — стартова діагностика
+│   │   ├── Bios.h             — клас BIOS (boot, консоль, статус)
+│   │   ├── IConsole.h         — інтерфейс консолі (не залежить від UART)
+│   │   ├── UartConsole.h      — консоль над фізичним Serial (fallback)
+│   │   └── Diagnostics.h      — стартова діагностика (пише через IConsole)
 │   └── transport/
 │       ├── ITransport.h      — інтерфейс Transport (кордон BIOS/Transport)
 │       └── StubTransport.h   — заглушка (Transport відключений)
@@ -130,9 +132,10 @@ firmware/grut-node/
 │       ├── CommandParser.h
 │       └── CommandParser.cpp
 ├── src/
-│   ├── main.cpp
+│   ├── main.cpp               — створює UartConsole + StubTransport, інжектує в Bios
 │   ├── bios/
 │   │   ├── Bios.cpp
+│   │   ├── UartConsole.cpp    — єдине місце в BIOS, що торкається Serial
 │   │   └── Diagnostics.cpp
 │   └── transport/
 │       └── StubTransport.cpp
