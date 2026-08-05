@@ -29,15 +29,10 @@ bool UartTransport::isRunning() const {
 }
 
 void UartTransport::poll() {
-  if (!running_) {
-    return;
-  }
-  // Drain incoming bytes silently. No protocol/bridging logic yet - see
-  // class comment. This only proves UartTransport can exclusively own
-  // the physical UART while active.
-  while (Serial.available() > 0) {
-    Serial.read();
-  }
+  // Nothing to do here anymore: byte-level draining is FrameBuilder's
+  // job now (via available()/read()), not this driver's. Kept for
+  // ITransport symmetry with EspNowDriver/IConsole, and reserved for
+  // future housekeeping that isn't tied to a specific byte.
 }
 
 bool UartTransport::send(const uint8_t* data, size_t length) {
@@ -49,6 +44,20 @@ bool UartTransport::send(const uint8_t* data, size_t length) {
 
 const char* UartTransport::name() const {
   return "uart";
+}
+
+int UartTransport::available() {
+  if (!running_) {
+    return 0;
+  }
+  return Serial.available();
+}
+
+int UartTransport::read() {
+  if (!running_) {
+    return -1;
+  }
+  return Serial.read();
 }
 
 }  // namespace transport

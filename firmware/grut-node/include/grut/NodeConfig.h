@@ -23,4 +23,11 @@ namespace grut {
 
 constexpr uint8_t kPeerMac[6] = GRUT_PEER_MAC;
 
+// GRUT protocol-level addresses (1 byte, see docs/PROTOCOL.md) are
+// simply the role numbers for this two-node bridge - no separate
+// address config needed while there are only two possible values.
+constexpr uint8_t kOwnAddr = GRUT_NODE_ROLE;
+constexpr uint8_t kPeerAddr =
+    (GRUT_NODE_ROLE == GRUT_ROLE_AIR) ? GRUT_ROLE_GROUND : GRUT_ROLE_AIR;
+
 }  // namespace grut
