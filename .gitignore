@@ -2,3 +2,4 @@
 .vscode/
 *.o
 *.bin
+firmware/grut-node/config/local_bridge_config.h

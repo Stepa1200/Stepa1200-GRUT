@@ -1,13 +1,35 @@
 #include "transport/FrameReceiver.h"
 
+#include <cstdio>
+
 #include "FrameCodec.h"
 #include "GrutProtocol.h"
 
 namespace grut {
 namespace transport {
 
-FrameReceiver::FrameReceiver(EspNowDriver& espNow, UartTransport& uart)
-    : espNow_(espNow), uart_(uart) {}
+namespace {
+
+uint32_t getU32LE(const uint8_t* p) {
+  return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+         (static_cast<uint32_t>(p[2]) << 16) |
+         (static_cast<uint32_t>(p[3]) << 24);
+}
+
+// Must match bridge_main.cpp's sendStats() field order exactly - this
+// is ad hoc, TEMPORARY diagnostic wire format, not part of the GRUT
+// protocol spec (docs/PROTOCOL.md). 12 uint32 fields, 48 bytes.
+constexpr size_t kStatsFieldCount = 12;
+constexpr size_t kStatsPayloadBytes = kStatsFieldCount * 4;
+
+}  // namespace
+
+FrameReceiver::FrameReceiver(EspNowDriver& espNow, UartTransport& uart,
+                              bool debugPrintHeartbeats, bool debugPrintStats)
+    : espNow_(espNow),
+      uart_(uart),
+      debugPrintHeartbeats_(debugPrintHeartbeats),
+      debugPrintStats_(debugPrintStats) {}
 
 void FrameReceiver::poll() {
   uint8_t rawFrame[grut::protocol::kMaxFrameSizeBytes];
@@ -22,17 +44,87 @@ void FrameReceiver::poll() {
         rawFrame, rawLen, &header, payload, sizeof(payload), &payloadLen);
 
     if (result != grut::protocol::DecodeResult::kOk) {
+      ++decodeFailures_;
       continue;  // corrupted/malformed - drop silently, no retransmission
     }
 
-    if (header.type != static_cast<uint8_t>(grut::protocol::PacketType::kData)) {
-      continue;  // heartbeat/control - reserved, not handled yet
+    if (header.type == static_cast<uint8_t>(grut::protocol::PacketType::kHeartbeat)) {
+      if (debugPrintHeartbeats_) {
+        const uint8_t marker[] = {'H', 'B', '\r', '\n'};
+        uart_.send(marker, sizeof(marker));
+      }
+      continue;  // heartbeat carries no UART payload either way
     }
 
+    if (header.type == static_cast<uint8_t>(grut::protocol::PacketType::kControl)) {
+      if (debugPrintStats_ && payloadLen == kStatsPayloadBytes) {
+        uint32_t f[kStatsFieldCount];
+        for (size_t i = 0; i < kStatsFieldCount; ++i) {
+          f[i] = getU32LE(payload + i * 4);
+        }
+        char line[192];
+        const int len = snprintf(
+            line, sizeof(line),
+            "STATS src=%u rd=%lu tx=%lu txAttempt=%lu txErr=%lu txOk=%lu "
+            "txFail=%lu txDrop=%lu rxDrop=%lu dec=%lu gap=%lu wr=%lu "
+            "wrFail=%lu\r\n",
+            static_cast<unsigned>(header.srcAddr),
+            static_cast<unsigned long>(f[0]), static_cast<unsigned long>(f[1]),
+            static_cast<unsigned long>(f[2]), static_cast<unsigned long>(f[3]),
+            static_cast<unsigned long>(f[4]), static_cast<unsigned long>(f[5]),
+            static_cast<unsigned long>(f[6]), static_cast<unsigned long>(f[7]),
+            static_cast<unsigned long>(f[8]), static_cast<unsigned long>(f[9]),
+            static_cast<unsigned long>(f[10]), static_cast<unsigned long>(f[11]));
+        if (len > 0) {
+          uart_.send(reinterpret_cast<const uint8_t*>(line),
+                     static_cast<size_t>(len));
+        }
+      }
+      continue;  // control frames never carry UART payload
+    }
+
+    if (header.type != static_cast<uint8_t>(grut::protocol::PacketType::kData)) {
+      continue;  // unknown type - reserved, not handled yet
+    }
+
+    // Sequence gap tracking: only meaningful for kData frames, since
+    // FrameBuilder increments one shared counter across everything it
+    // sends (kData chunks) - see FrameBuilder::flush().
+    if (hasSequence_) {
+      const uint16_t expected = expectedSequence_;
+      if (header.sequence != expected) {
+        const uint16_t gap =
+            static_cast<uint16_t>(header.sequence - expected);
+        sequenceGaps_ += gap;
+      }
+    }
+    expectedSequence_ = static_cast<uint16_t>(header.sequence + 1);
+    hasSequence_ = true;
+
     if (payloadLen > 0) {
-      uart_.send(payload, payloadLen);
+      const size_t written = uart_.send(payload, payloadLen) ? payloadLen : 0;
+      uartBytesWritten_ += written;
+      if (written != payloadLen) {
+        ++uartWriteFailures_;
+      }
     }
   }
+}
+
+uint32_t FrameReceiver::decodeFailureCount() const {
+  return decodeFailures_;
+}
+
+uint32_t FrameReceiver::sequenceGapCount() const {
+  return sequenceGaps_;
+}
+
+uint32_t FrameReceiver::uartBytesWritten() const {
+  return uartBytesWritten_;
+}
+
+uint32_t FrameReceiver::uartWriteFailureCount() const {
+  return uartWriteFailures_;
 }
 
 }  // namespace transport

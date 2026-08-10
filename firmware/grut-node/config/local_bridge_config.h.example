@@ -1,0 +1,24 @@
+#pragma once
+
+#include <cstdint>
+
+// TEMPLATE - copy this file to "local_bridge_config.h" (same
+// directory) and fill in your actual pair of nodes' MAC addresses.
+// "local_bridge_config.h" is gitignored and must never be committed -
+// only this .example file is tracked.
+//
+// Find a node's MAC by flashing the BIOS-only firmware (env:esp8285)
+// and reading "mac_address=" from the startup diagnostics over the
+// console (see README_UA.md).
+
+namespace grut {
+
+#if defined(GRUT_BRIDGE_ROLE_AIR)
+// This node is AIR - kPeerMac must be the GROUND node's MAC.
+constexpr uint8_t kPeerMac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+#elif defined(GRUT_BRIDGE_ROLE_GROUND)
+// This node is GROUND - kPeerMac must be the AIR node's MAC.
+constexpr uint8_t kPeerMac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+#endif
+
+}  // namespace grut

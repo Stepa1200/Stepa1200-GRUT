@@ -44,6 +44,13 @@ class EspNowDriver {
 
   bool isRunning() const;
 
+  // Diagnostic only: the channel actually applied by the SDK right
+  // now (wifi_get_channel()), as opposed to the channel this driver
+  // was constructed with. ESP8266's wifi_set_channel() is known to be
+  // unreliable in some conditions - compare this against the
+  // constructor's `channel` argument to confirm they actually match.
+  uint8_t currentWifiChannel() const;
+
   // Feeds the next queued outgoing frame to esp_now_send() if none is
   // currently in flight. Call every loop() iteration.
   void poll();
@@ -61,6 +68,20 @@ class EspNowDriver {
   uint32_t droppedSendCount() const;
   uint32_t droppedReceiveCount() const;
 
+  // Diagnostic counters, all monotonically increasing from start().
+  // sendAttempted: every time esp_now_send() was actually called.
+  // sendImmediateErrorCount: esp_now_send() itself returned non-zero -
+  //   in this case sendInFlight_ is cleared right away (see
+  //   trySendNext()) so the driver never gets stuck waiting for a
+  //   callback that was never going to fire.
+  // sendCallbackSuccessCount / sendCallbackFailureCount: tallied from
+  //   the send callback's `status` parameter, which earlier versions
+  //   of this driver ignored entirely.
+  uint32_t sendAttemptedCount() const;
+  uint32_t sendImmediateErrorCount() const;
+  uint32_t sendCallbackSuccessCount() const;
+  uint32_t sendCallbackFailureCount() const;
+
  private:
   static void onSend(uint8_t* macAddr, uint8_t status);
   static void onReceive(uint8_t* macAddr, uint8_t* data, uint8_t length);
@@ -74,6 +95,11 @@ class EspNowDriver {
 
   FrameQueue sendQueue_;
   FrameQueue recvQueue_;
+
+  uint32_t sendAttempted_ = 0;
+  uint32_t sendImmediateErrors_ = 0;
+  uint32_t sendCallbackSuccesses_ = 0;
+  uint32_t sendCallbackFailures_ = 0;
 };
 
 }  // namespace transport

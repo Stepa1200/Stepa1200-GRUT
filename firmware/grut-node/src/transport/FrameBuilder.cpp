@@ -1,5 +1,7 @@
 #include "transport/FrameBuilder.h"
 
+#include <Arduino.h>
+
 #include "FrameCodec.h"
 #include "GrutProtocol.h"
 
@@ -18,16 +20,21 @@ void FrameBuilder::poll() {
     }
 
     chunkBuffer_[chunkLength_++] = static_cast<uint8_t>(value);
+    lastByteMicros_ = micros();
+    ++uartBytesRead_;
 
     if (chunkLength_ == kChunkPayloadBytes) {
       flush();
     }
   }
 
-  // Nothing more available right now - send whatever's pending rather
-  // than waiting for the chunk to fill, so small/infrequent messages
-  // (e.g. MAVLink heartbeats) are not delayed.
-  flush();
+  // Flush only after a short idle gap, not unconditionally - see class
+  // comment in FrameBuilder.h for why the unconditional version
+  // fragmented every UART burst into near-single-byte GRUT frames.
+  if (chunkLength_ > 0 &&
+      (micros() - lastByteMicros_) >= kIdleFlushMicros) {
+    flush();
+  }
 }
 
 void FrameBuilder::flush() {
@@ -48,6 +55,7 @@ void FrameBuilder::flush() {
 
   if (frameLen > 0) {
     espNow_.send(frameBuf, frameLen);
+    ++framesSent_;
   }
   // If encoding somehow failed (shouldn't - chunkLength_ is always
   // <= kChunkPayloadBytes <= kMaxGrutPayloadBytes) or the send queue
@@ -55,6 +63,14 @@ void FrameBuilder::flush() {
   // 0005's "no lossless delivery guarantee" for v0.2.0. Either way,
   // reset the buffer so FrameBuilder never gets stuck.
   chunkLength_ = 0;
+}
+
+uint32_t FrameBuilder::uartBytesRead() const {
+  return uartBytesRead_;
+}
+
+uint32_t FrameBuilder::framesSent() const {
+  return framesSent_;
 }
 
 }  // namespace transport

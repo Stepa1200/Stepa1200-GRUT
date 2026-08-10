@@ -2,32 +2,39 @@
 
 #include <cstdint>
 
-// Role and peer MAC are supplied via PlatformIO per-node build_flags
-// (see platformio.ini env:esp8285-air / env:esp8285-ground, ADR 0006).
-// Only code that actually needs them includes this header - the
-// generic env:esp8285 (BIOS testing) does not define these flags and
-// must not include this header.
+// Role (GRUT_BRIDGE_ROLE_AIR / GRUT_BRIDGE_ROLE_GROUND) and this
+// node's GRUT protocol address (GRUT_NODE_ID) are supplied as
+// PlatformIO build_flags by env:esp8285-air / env:esp8285-ground (see
+// platformio.ini). Only bridge_main.cpp includes this header - the
+// generic env:esp8285 (BIOS-only) build excludes bridge_main.cpp
+// entirely and never reaches these checks.
 
-#define GRUT_ROLE_AIR 1
-#define GRUT_ROLE_GROUND 2
-
-#ifndef GRUT_NODE_ROLE
-#error "GRUT_NODE_ROLE not defined - build with env:esp8285-air or env:esp8285-ground"
+#if defined(GRUT_BRIDGE_ROLE_AIR) && defined(GRUT_BRIDGE_ROLE_GROUND)
+#error "Both GRUT_BRIDGE_ROLE_AIR and GRUT_BRIDGE_ROLE_GROUND are defined - pick one build environment"
 #endif
 
-#ifndef GRUT_PEER_MAC
-#error "GRUT_PEER_MAC not defined - build with env:esp8285-air or env:esp8285-ground"
+#if !defined(GRUT_BRIDGE_ROLE_AIR) && !defined(GRUT_BRIDGE_ROLE_GROUND)
+#error "No GRUT_BRIDGE_ROLE_* defined - build with env:esp8285-air or env:esp8285-ground"
 #endif
+
+#ifndef GRUT_NODE_ID
+#error "GRUT_NODE_ID not defined - build with env:esp8285-air or env:esp8285-ground"
+#endif
+
+// Peer MAC addresses are kept out of version control - see
+// config/local_bridge_config.h.example for the template. This file
+// must exist locally (gitignored) before building env:esp8285-air or
+// env:esp8285-ground.
+#include "local_bridge_config.h"
 
 namespace grut {
 
-constexpr uint8_t kPeerMac[6] = GRUT_PEER_MAC;
+constexpr uint8_t kOwnAddr = GRUT_NODE_ID;
 
-// GRUT protocol-level addresses (1 byte, see docs/PROTOCOL.md) are
-// simply the role numbers for this two-node bridge - no separate
-// address config needed while there are only two possible values.
-constexpr uint8_t kOwnAddr = GRUT_NODE_ROLE;
-constexpr uint8_t kPeerAddr =
-    (GRUT_NODE_ROLE == GRUT_ROLE_AIR) ? GRUT_ROLE_GROUND : GRUT_ROLE_AIR;
+#if defined(GRUT_BRIDGE_ROLE_AIR)
+constexpr uint8_t kPeerAddr = 2;  // GROUND
+#else
+constexpr uint8_t kPeerAddr = 1;  // AIR
+#endif
 
 }  // namespace grut

@@ -81,6 +81,10 @@ bool EspNowDriver::isRunning() const {
   return running_;
 }
 
+uint8_t EspNowDriver::currentWifiChannel() const {
+  return wifi_get_channel();
+}
+
 void EspNowDriver::poll() {
   if (!running_) {
     return;
@@ -110,6 +114,22 @@ uint32_t EspNowDriver::droppedReceiveCount() const {
   return recvQueue_.droppedCount();
 }
 
+uint32_t EspNowDriver::sendAttemptedCount() const {
+  return sendAttempted_;
+}
+
+uint32_t EspNowDriver::sendImmediateErrorCount() const {
+  return sendImmediateErrors_;
+}
+
+uint32_t EspNowDriver::sendCallbackSuccessCount() const {
+  return sendCallbackSuccesses_;
+}
+
+uint32_t EspNowDriver::sendCallbackFailureCount() const {
+  return sendCallbackFailures_;
+}
+
 void EspNowDriver::trySendNext() {
   if (sendInFlight_ || sendQueue_.empty()) {
     return;
@@ -122,15 +142,32 @@ void EspNowDriver::trySendNext() {
   }
 
   sendInFlight_ = true;
-  esp_now_send(peerMac_, buffer, static_cast<int>(length));
+  ++sendAttempted_;
+
+  const int result = esp_now_send(peerMac_, buffer, static_cast<int>(length));
+  if (result != 0) {
+    // esp_now_send() failed immediately - no callback will ever fire
+    // for this attempt. Clearing sendInFlight_ here is essential:
+    // without it, the driver would wait forever for a callback that
+    // was never coming, and every subsequent frame would queue up
+    // and eventually be dropped once the (never-draining) queue fills.
+    sendInFlight_ = false;
+    ++sendImmediateErrors_;
+  }
 }
 
-void EspNowDriver::onSend(uint8_t* /*macAddr*/, uint8_t /*status*/) {
+void EspNowDriver::onSend(uint8_t* /*macAddr*/, uint8_t status) {
   // ADR 0005: callback must stay minimal - no UART, no parsing, no
   // logging, no retransmission. Just clear the in-flight flag so
-  // poll() can send the next queued frame, if any.
+  // poll() can send the next queued frame, if any, and tally the
+  // result for diagnostics.
   if (g_activeDriver != nullptr) {
     g_activeDriver->sendInFlight_ = false;
+    if (status == 0) {
+      ++g_activeDriver->sendCallbackSuccesses_;
+    } else {
+      ++g_activeDriver->sendCallbackFailures_;
+    }
   }
 }
 
