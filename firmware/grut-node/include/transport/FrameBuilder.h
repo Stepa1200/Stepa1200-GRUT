@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "transport/EspNowDriver.h"
+#include "transport/SequenceGenerator.h"
 #include "transport/UartTransport.h"
 
 namespace grut {
@@ -34,7 +35,10 @@ class FrameBuilder {
 
   // srcAddr/dstAddr: this node's and its peer's GRUT protocol address
   // (see docs/PROTOCOL.md) - not MAC addresses.
-  FrameBuilder(UartTransport& uart, EspNowDriver& espNow, uint8_t srcAddr,
+  // sequence: node-wide sequence allocator shared with every other
+  // outbound GRUT frame producer (heartbeat/control included).
+  FrameBuilder(UartTransport& uart, EspNowDriver& espNow,
+               SequenceGenerator& sequence, uint8_t srcAddr,
                uint8_t dstAddr);
 
   // Drains available UART bytes into the current chunk and flushes per
@@ -51,9 +55,9 @@ class FrameBuilder {
 
   UartTransport& uart_;
   EspNowDriver& espNow_;
+  SequenceGenerator& sequence_;
   uint8_t srcAddr_;
   uint8_t dstAddr_;
-  uint16_t nextSequence_ = 0;
 
   uint8_t chunkBuffer_[kChunkPayloadBytes];
   size_t chunkLength_ = 0;

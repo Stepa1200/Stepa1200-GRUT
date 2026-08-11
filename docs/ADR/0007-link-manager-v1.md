@@ -83,7 +83,10 @@ Loss is computed **only from GRUT frame sequence numbers**, never from
 raw UART/MAVLink byte counts - the sequence number is the one
 authoritative, protocol-level signal for "was a frame lost between the
 two nodes," and it is already present in every frame header
-(`docs/PROTOCOL.md`). Tracked fields:
+(`docs/PROTOCOL.md`). A sender therefore uses one node-wide sequence
+allocator across `kData`, `kHeartbeat`, `kControl`, and future GRUT frame
+types; receivers account sequence before dispatching by packet type.
+Tracked fields:
 
 - `expectedSequence`
 - `receivedSequence`
@@ -144,9 +147,10 @@ getting either wrong would silently break the design's intent:
 A `LINK_STATS` payload, carried as a `PacketType::kControl` frame
 (the same reserved type already used for the temporary bring-up stats
 mechanism this milestone formalizes), containing: current link state,
-short-window loss, long-window loss, heartbeat age, and the raw
-counters above. No new transport, no console - this rides the existing
-bridge.
+short-window loss, long-window loss, heartbeat age, and the raw counters
+above. The concrete v1 payload layout is defined in `docs/PROTOCOL.md`.
+No new transport, no console - this rides the existing bridge and control
+frames are never forwarded into the opaque UART data stream.
 
 ## Consequences
 
@@ -189,3 +193,15 @@ bridge.
   Until that layer exists, LinkManager's state is informational only -
   this is intentional for v1, but means v1 alone does not make the
   vehicle any safer, only more observable.
+
+
+### LINK_STATS scheduling
+LINK_STATS is best-effort, lowest priority and must be skipped while transport is busy.
+
+### Hardware diagnostic build
+
+`env:esp8285-ground-linkdiag` is a development-only GROUND image for
+hardware-verifying LinkManager state transitions and counters. It owns the
+GROUND UART exclusively for ASCII diagnostics and deliberately does **not**
+forward `kData` to UART, so Mission Planner must be closed while this image is
+running. Production `esp8285-air` / `esp8285-ground` behavior is unchanged.

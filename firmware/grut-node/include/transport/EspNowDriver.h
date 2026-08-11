@@ -61,6 +61,17 @@ class EspNowDriver {
   // FrameQueue::kMaxFrameBytes.
   bool send(const uint8_t* frameBytes, size_t frameLength);
 
+  // Lowest-priority/best-effort management send. The frame is accepted only
+  // when there is no ESP-NOW frame in flight and the normal DATA send queue
+  // is empty. Returning false here does NOT increment droppedSendCount():
+  // management telemetry is allowed to be skipped and must never consume
+  // capacity needed by the transported UART byte stream.
+  bool sendIfIdle(const uint8_t* frameBytes, size_t frameLength);
+
+  // True only when there is no frame currently in flight and the normal
+  // send queue is empty. Intended for management/diagnostic scheduling.
+  bool txIdle() const;
+
   // Pops one received raw frame, if any. Returns false if the receive
   // queue is empty.
   bool receive(uint8_t* outBuffer, size_t outCapacity, size_t* outLength);

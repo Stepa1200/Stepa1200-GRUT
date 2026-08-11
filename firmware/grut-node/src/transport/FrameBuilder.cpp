@@ -9,8 +9,13 @@ namespace grut {
 namespace transport {
 
 FrameBuilder::FrameBuilder(UartTransport& uart, EspNowDriver& espNow,
-                            uint8_t srcAddr, uint8_t dstAddr)
-    : uart_(uart), espNow_(espNow), srcAddr_(srcAddr), dstAddr_(dstAddr) {}
+                           SequenceGenerator& sequence, uint8_t srcAddr,
+                           uint8_t dstAddr)
+    : uart_(uart),
+      espNow_(espNow),
+      sequence_(sequence),
+      srcAddr_(srcAddr),
+      dstAddr_(dstAddr) {}
 
 void FrameBuilder::poll() {
   while (uart_.available() > 0) {
@@ -46,7 +51,7 @@ void FrameBuilder::flush() {
   header.type = static_cast<uint8_t>(grut::protocol::PacketType::kData);
   header.srcAddr = srcAddr_;
   header.dstAddr = dstAddr_;
-  header.sequence = nextSequence_++;
+  header.sequence = sequence_.next();
 
   uint8_t frameBuf[grut::protocol::kMaxFrameSizeBytes];
   const size_t frameLen =

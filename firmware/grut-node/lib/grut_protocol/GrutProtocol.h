@@ -18,8 +18,8 @@ constexpr uint8_t kBroadcastAddress = 0xFF;
 
 enum class PacketType : uint8_t {
   kData = 0x01,       // opaque UART byte-stream chunk
-  kHeartbeat = 0x02,  // reserved for LinkManager (not implemented yet)
-  kControl = 0x03,    // reserved for future control messages
+  kHeartbeat = 0x02,  // LinkManager heartbeat supervision
+  kControl = 0x03,    // management payloads (currently LINK_STATS v1)
 };
 
 // Bitmask flags. Most bits are reserved for future milestones (ack,

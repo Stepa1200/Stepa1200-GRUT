@@ -101,6 +101,25 @@ bool EspNowDriver::send(const uint8_t* frameBytes, size_t frameLength) {
   return queued;
 }
 
+bool EspNowDriver::sendIfIdle(const uint8_t* frameBytes, size_t frameLength) {
+  if (!running_ || sendInFlight_ || !sendQueue_.empty()) {
+    return false;
+  }
+  // No normal DATA is queued, so this best-effort frame cannot displace an
+  // already-buffered transport frame. If a DATA burst arrives immediately
+  // afterwards it still gets the full normal FrameQueue capacity.
+  const bool queued = sendQueue_.push(frameBytes, frameLength);
+  if (!queued) {
+    return false;
+  }
+  trySendNext();
+  return true;
+}
+
+bool EspNowDriver::txIdle() const {
+  return !sendInFlight_ && sendQueue_.empty();
+}
+
 bool EspNowDriver::receive(uint8_t* outBuffer, size_t outCapacity,
                             size_t* outLength) {
   return recvQueue_.pop(outBuffer, outCapacity, outLength);

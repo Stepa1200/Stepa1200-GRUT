@@ -9,8 +9,9 @@ code is the source of truth for exact field widths, and this document
 should be corrected to match it.
 
 Implemented so far: frame header, packet types, flags, CRC, encoder,
-decoder, and the ESP-NOW v1 size limit. **Not yet implemented:** the
-ESP-NOW driver itself, UART chunking (Frame Builder), retransmission,
+decoder, ESP-NOW v1 size limit, ESP-NOW driver, UART chunking
+(FrameBuilder/FrameReceiver), heartbeat bring-up frames, and node-wide
+sequence allocation. **Not yet implemented:** retransmission,
 LinkManager, mesh/routing. See ADR 0005 for the full roadmap.
 
 ## Design principle
@@ -45,7 +46,7 @@ itself). Total frame size (header + payload + CRC) must never exceed
 | 3      | `srcAddr`       | uint8   | 1    | Sender's node address. |
 | 4      | `dstAddr`       | uint8   | 1    | Destination node address, or `0xFF` (broadcast). |
 | 5      | `ttl`           | uint8   | 1    | Time-to-live. Not acted upon yet (no relay/mesh in this milestone) - carried for forward compatibility. |
-| 6-7    | `sequence`      | uint16  | 2    | Per-sender monotonically increasing counter, little-endian on the wire. Management of the counter (incrementing per frame) belongs to the future Frame Builder, not to the codec. |
+| 6-7    | `sequence`      | uint16  | 2    | Per-sender monotonically increasing counter, little-endian on the wire. One node-wide allocator increments it for every outbound GRUT frame regardless of packet type; it wraps `65535 -> 0`. The codec only serializes/deserializes the supplied value. |
 | 8      | `payloadLength` | uint8   | 1    | Number of payload bytes following the header. Set automatically by the encoder; used by the decoder to locate the CRC trailer. |
 
 The in-memory `GrutFrameHeader` C++ struct (see `GrutProtocol.h`) uses
@@ -59,8 +60,8 @@ field-by-field by `FrameCodec`, never memcpy'd as a raw struct.
 | Value | Name        | Meaning |
 |-------|-------------|---------|
 | `0x01`| `kData`     | An opaque chunk of the UART byte stream. No relationship to MAVLink message boundaries - see [UART as an opaque byte stream](#uart-as-an-opaque-byte-stream). |
-| `0x02`| `kHeartbeat`| Reserved for the future LinkManager milestone (RSSI/loss/reconnect tracking). Not sent or processed by any code yet. |
-| `0x03`| `kControl`  | Reserved for future control/pairing messages. Not sent or processed by any code yet. |
+| `0x02`| `kHeartbeat`| Empty heartbeat frame used by LinkManager supervision. |
+| `0x03`| `kControl`  | Control/management frame. LINK_STATS v1 is the first formal payload subtype. |
 
 ## Flags
 
@@ -115,11 +116,11 @@ indefinitely.
 ## UART as an opaque byte stream
 
 Per ADR 0005, `kData` frames do not need to align with MAVLink message
-boundaries - the (not-yet-implemented) Frame Builder treats UART input
-as a raw byte stream and chunks it into bounded `kData` frames (roughly
-180-220 payload bytes each, comfortably under the 239-byte maximum).
-The (not-yet-implemented) receiver writes payload bytes back to UART in
-sequence order. A single MAVLink message may therefore span two GRUT
+boundaries - FrameBuilder treats UART input as a raw byte stream and
+chunks it into bounded `kData` frames (currently up to 200 payload
+bytes, comfortably under the 239-byte maximum). FrameReceiver writes
+DATA payload bytes back to UART in receive order. A single MAVLink
+message may therefore span two GRUT
 frames; if a frame is lost, the reassembled UART stream will contain a
 gap that the downstream MAVLink parser (e.g. Mission Planner) must
 tolerate on its own. GRUT v0.2.0 does not guarantee lossless delivery -
@@ -127,11 +128,50 @@ see ADR 0005 for the full list of what is deliberately out of scope.
 
 ## Heartbeat and control messages
 
-`PacketType::kHeartbeat` and `PacketType::kControl` are reserved in
-this milestone: the type values exist so the wire format is stable
-going forward, but no code sends, receives, or interprets them yet.
-Their actual content and semantics will be defined when the LinkManager
-milestone (RSSI, packet loss, reconnect, statistics) is implemented.
+`PacketType::kHeartbeat` is transmitted as an empty frame at the bridge
+heartbeat interval. `PacketType::kControl` carries management payloads.
+Both packet types consume the same node-wide `sequence` counter as `kData`;
+this is required so a receiver can use one authoritative GRUT-frame
+sequence for link-loss accounting.
+
+### LINK_STATS control payload v1
+
+The first formal `kControl` subtype is `LINK_STATS` (`subtype = 0x01`).
+It exports one LinkManager snapshot every 3 seconds. Control frames are
+consumed internally and are never forwarded to the opaque UART byte stream.
+All multi-byte fields are little-endian.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 1 | control subtype = `0x01` (`LINK_STATS`) |
+| 1 | 1 | payload version = `1` |
+| 2 | 1 | LinkState (`UNKNOWN=0`, `UP=1`, `DEGRADED=2`, `DOWN=3`, `RECOVERING=4`) |
+| 3 | 1 | recovery heartbeat count |
+| 4 | 2 | short-window loss, permille |
+| 6 | 2 | long-window loss, permille |
+| 8 | 4 | heartbeat age, ms (`0xFFFFFFFF` = never seen) |
+| 12 | 4 | valid GRUT frames received |
+| 16 | 4 | GRUT sequence gaps |
+| 20 | 4 | send failures |
+| 24 | 4 | queue drops |
+
+Total payload size: **28 bytes**; serialized GRUT frame size: **39 bytes**.
+Unknown control subtypes or payload versions are ignored.
+
+Compatibility: this formalizes the previously ad-hoc `kControl` statistics
+payload without changing the GRUT frame header, CRC, or protocol version.
+An older peer will ignore the new control payload, but AIR and GROUND should
+run matching firmware so both sides expose the same LinkManager semantics.
+
+### Sequence compatibility note
+
+Before LinkManager work, bridge firmware assigned advancing sequence
+numbers only to `kData`; temporary heartbeat/control frames therefore
+usually carried zero. From the node-wide sequence change onward, every
+outbound GRUT frame consumes one sequence value. The wire layout and
+protocol version remain unchanged, but AIR and GROUND should be updated
+as a pair: mixing old and new sequence semantics makes loss counters
+ambiguous even though UART payload transport itself remains decodable.
 
 ## Size limits
 
