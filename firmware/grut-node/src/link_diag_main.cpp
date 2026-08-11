@@ -12,6 +12,7 @@
 #include "GrutProtocol.h"
 #include "LinkManager.h"
 #include "LinkStatsCodec.h"
+#include "NeighborTable.h"
 #include "grut/NodeConfig.h"
 #include "grut/PhysicalUart.h"
 #include "transport/EspNowDriver.h"
@@ -27,6 +28,7 @@ static_assert(grut::kOwnAddr == 2, "link diagnostic build is GROUND-only");
 grut::transport::EspNowDriver gEspNow(kEspNowChannel, grut::kPeerMac);
 grut::transport::SequenceGenerator gSequence;
 grut::link::LinkManager gLinkManager;
+grut::neighbor::NeighborTable gNeighborTable;
 
 grut::link::LinkState gLastPrintedState = grut::link::LinkState::kUnknown;
 uint32_t gLastHeartbeatTxMs = 0;
@@ -124,6 +126,7 @@ void processReceivedFrames(uint32_t nowMs) {
     }
 
     gLinkManager.onFrameReceived(header.sequence, nowMs);
+    gNeighborTable.onFrameObserved(header.srcAddr, nowMs);
 
     if (header.type ==
         static_cast<uint8_t>(grut::protocol::PacketType::kHeartbeat)) {
@@ -195,6 +198,37 @@ void printSnapshot(uint32_t nowMs) {
   }
 }
 
+void printNeighbors(uint32_t nowMs) {
+  // Today's topology is fixed 1-to-1, so the only address that can ever
+  // appear in NeighborTable is grut::kPeerAddr (a compile-time
+  // constant already used elsewhere in this file - see
+  // processReceivedFrames()). This means the existing get(address) API
+  // is sufficient here; NeighborTable itself needs no changes and no
+  // enumeration method. Revisit this once a real multi-neighbor
+  // topology exists.
+  const grut::neighbor::NeighborInfo info = gNeighborTable.get(grut::kPeerAddr);
+  if (!info.known) {
+    writeLine("NEIGHBOR none");
+    return;
+  }
+
+  const uint32_t age = nowMs - info.lastSeenMs;
+  const bool alive = gNeighborTable.isFresh(info.address, nowMs);
+
+  // LinkState is not stored in NeighborTable (that would duplicate
+  // LinkManager's job - see NeighborTable.h). This diagnostic firmware
+  // has exactly one LinkManager instance for this single fixed peer,
+  // so it is safe to report gLinkManager's state alongside this entry.
+  char line[112];
+  snprintf(line, sizeof(line), "NEIGHBOR id=%u age=%lu alive=%u rx=%lu gaps=%lu state=%s",
+           static_cast<unsigned>(info.address),
+           static_cast<unsigned long>(age), alive ? 1 : 0,
+           static_cast<unsigned long>(info.rxFrames),
+           static_cast<unsigned long>(info.sequenceGaps),
+           stateName(gLinkManager.state()));
+  writeLine(line);
+}
+
 }  // namespace
 
 void setup() {
@@ -246,5 +280,6 @@ void loop() {
   if (static_cast<uint32_t>(now - gLastPrintMs) >= kPrintIntervalMs) {
     gLastPrintMs = now;
     printSnapshot(now);
+    printNeighbors(now);
   }
 }
