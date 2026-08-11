@@ -25,11 +25,15 @@ constexpr size_t kStatsPayloadBytes = kStatsFieldCount * 4;
 }  // namespace
 
 FrameReceiver::FrameReceiver(EspNowDriver& espNow, UartTransport& uart,
-                              bool debugPrintHeartbeats, bool debugPrintStats)
+                              bool debugPrintHeartbeats, bool debugPrintStats,
+                              ValidFrameObserver validFrameObserver,
+                              ControlFrameObserver controlFrameObserver)
     : espNow_(espNow),
       uart_(uart),
       debugPrintHeartbeats_(debugPrintHeartbeats),
-      debugPrintStats_(debugPrintStats) {}
+      debugPrintStats_(debugPrintStats),
+      validFrameObserver_(validFrameObserver),
+      controlFrameObserver_(controlFrameObserver) {}
 
 void FrameReceiver::poll() {
   uint8_t rawFrame[grut::protocol::kMaxFrameSizeBytes];
@@ -48,6 +52,29 @@ void FrameReceiver::poll() {
       continue;  // corrupted/malformed - drop silently, no retransmission
     }
 
+    // sequence is node-wide and advances for every outbound GRUT frame,
+    // regardless of packet type. Account for it before dispatching by type;
+    // otherwise a HEARTBEAT/CONTROL frame between two DATA frames would look
+    // like a false DATA loss on the next payload frame.
+    if (hasSequence_) {
+      const uint16_t expected = expectedSequence_;
+      if (header.sequence != expected) {
+        const uint16_t gap =
+            static_cast<uint16_t>(header.sequence - expected);
+        sequenceGaps_ += gap;
+      }
+    }
+    expectedSequence_ = static_cast<uint16_t>(header.sequence + 1u);
+    hasSequence_ = true;
+
+    // Passive observation hook for LinkManager integration. This runs in the
+    // normal main-loop context (never in the ESP-NOW callback), after a frame
+    // has been validated but before packet-type dispatch. The observer cannot
+    // alter payload delivery or acknowledge/drop the frame.
+    if (validFrameObserver_ != nullptr) {
+      validFrameObserver_(header.srcAddr, header.sequence, header.type);
+    }
+
     if (header.type == static_cast<uint8_t>(grut::protocol::PacketType::kHeartbeat)) {
       if (debugPrintHeartbeats_) {
         const uint8_t marker[] = {'H', 'B', '\r', '\n'};
@@ -57,6 +84,9 @@ void FrameReceiver::poll() {
     }
 
     if (header.type == static_cast<uint8_t>(grut::protocol::PacketType::kControl)) {
+      if (controlFrameObserver_ != nullptr) {
+        controlFrameObserver_(header.srcAddr, payload, payloadLen);
+      }
       if (debugPrintStats_ && payloadLen == kStatsPayloadBytes) {
         uint32_t f[kStatsFieldCount];
         for (size_t i = 0; i < kStatsFieldCount; ++i) {
@@ -86,20 +116,6 @@ void FrameReceiver::poll() {
     if (header.type != static_cast<uint8_t>(grut::protocol::PacketType::kData)) {
       continue;  // unknown type - reserved, not handled yet
     }
-
-    // Sequence gap tracking: only meaningful for kData frames, since
-    // FrameBuilder increments one shared counter across everything it
-    // sends (kData chunks) - see FrameBuilder::flush().
-    if (hasSequence_) {
-      const uint16_t expected = expectedSequence_;
-      if (header.sequence != expected) {
-        const uint16_t gap =
-            static_cast<uint16_t>(header.sequence - expected);
-        sequenceGaps_ += gap;
-      }
-    }
-    expectedSequence_ = static_cast<uint16_t>(header.sequence + 1);
-    hasSequence_ = true;
 
     if (payloadLen > 0) {
       const size_t written = uart_.send(payload, payloadLen) ? payloadLen : 0;

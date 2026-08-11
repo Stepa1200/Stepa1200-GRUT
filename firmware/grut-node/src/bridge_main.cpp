@@ -10,10 +10,14 @@
 
 #include "FrameCodec.h"
 #include "GrutProtocol.h"
+#include "LinkManager.h"
+#include "LinkStatsCodec.h"
+#include "NeighborTable.h"
 #include "grut/NodeConfig.h"
 #include "transport/EspNowDriver.h"
 #include "transport/FrameBuilder.h"
 #include "transport/FrameReceiver.h"
+#include "transport/SequenceGenerator.h"
 #include "transport/UartTransport.h"
 
 namespace {
@@ -25,15 +29,17 @@ constexpr uint8_t kEspNowChannel = 1;
 // TEMPORARY bring-up aid: send an empty kHeartbeat frame on this
 // interval, independent of any real UART traffic, so the ESP-NOW link
 // itself can be proven alive without a flight controller attached.
-constexpr unsigned long kHeartbeatIntervalMs = 1000;
+constexpr unsigned long kHeartbeatIntervalMs =
+    grut::link::LinkManager::kHeartbeatIntervalMs;
 
-// TEMPORARY diagnostic aid: send this node's own counters (FrameBuilder
-// + EspNowDriver + FrameReceiver) as a kControl frame on this interval,
-// so the OTHER node's UART (the one being observed) can print them -
-// see FrameReceiver's debugPrintStats. Not part of the GRUT protocol
-// spec; ad hoc wire format shared only between sendStats() below and
-// FrameReceiver.cpp's matching parser.
-constexpr unsigned long kStatsIntervalMs = 3000;
+// Permanent LinkManager v1 statistics export interval (ADR 0007). The
+// payload is a formal LINK_STATS kControl message encoded by LinkStatsCodec.
+// It never reaches the MAVLink UART; FrameReceiver consumes kControl frames
+// internally and exposes them only through the control observer.
+constexpr unsigned long kLinkStatsIntervalMs = 3000;
+// LINK_STATS is management telemetry and must never compete with active UART
+// transport. Require a short local-UART quiet window before a best-effort send.
+constexpr unsigned long kLinkStatsUartQuietMs = 100;
 
 // Master switch for ALL diagnostic UART writes (both the received-stats
 // print in FrameReceiver and printLocalStats() below). OFF by default:
@@ -45,8 +51,16 @@ constexpr bool kDiagnosticsEnabled = false;
 
 grut::transport::UartTransport gUart;
 grut::transport::EspNowDriver gEspNow(kEspNowChannel, grut::kPeerMac);
-grut::transport::FrameBuilder gFrameBuilder(gUart, gEspNow, grut::kOwnAddr,
-                                             grut::kPeerAddr);
+grut::transport::SequenceGenerator gSequence;
+grut::transport::FrameBuilder gFrameBuilder(gUart, gEspNow, gSequence,
+                                             grut::kOwnAddr, grut::kPeerAddr);
+grut::link::LinkManager gLinkManager;
+grut::neighbor::NeighborTable gNeighborTable;
+
+void observeValidFrame(uint8_t srcAddr, uint16_t sequence, uint8_t packetType);
+void observeControlFrame(uint8_t srcAddr, const uint8_t* payload,
+                         size_t payloadLength);
+
 // TEMPORARY: turn both back to false once done - see FrameReceiver.h
 // for why writing unsolicited bytes to UART is unsafe once real
 // MAVLink/data traffic is flowing on this same line. Both are now
@@ -54,18 +68,90 @@ grut::transport::FrameBuilder gFrameBuilder(gUart, gEspNow, grut::kOwnAddr,
 // test (see bring-up notes) - the STATS/LOCAL ASCII lines must not
 // stay on while real MAVLink is flowing, or they corrupt it exactly
 // like the earlier heartbeat marker did.
-grut::transport::FrameReceiver gFrameReceiver(gEspNow, gUart,
-                                               /*debugPrintHeartbeats=*/false,
-                                               /*debugPrintStats=*/kDiagnosticsEnabled);
+grut::transport::FrameReceiver gFrameReceiver(
+    gEspNow, gUart,
+    /*debugPrintHeartbeats=*/false,
+    /*debugPrintStats=*/kDiagnosticsEnabled,
+    /*validFrameObserver=*/&observeValidFrame,
+    /*controlFrameObserver=*/&observeControlFrame);
 
 unsigned long gLastHeartbeatMs = 0;
-unsigned long gLastStatsMs = 0;
+unsigned long gLastLinkStatsMs = 0;
+unsigned long gLastUartActivityMs = 0;
+uint32_t gLastObservedUartBytesRead = 0;
+uint32_t gObservedSendFailures = 0;
+uint32_t gObservedQueueDrops = 0;
+
+// Latest peer-exported LinkManager snapshot. This is deliberately kept in
+// memory only for now: Desktop/management integration comes later in the
+// roadmap, and the MAVLink UART must remain an opaque byte stream.
+grut::link::LinkStats gPeerLinkStats;
+bool gHasPeerLinkStats = false;
+uint32_t gPeerLinkStatsReceivedMs = 0;
+
+uint32_t currentSendFailureCount() {
+  return gEspNow.sendImmediateErrorCount() +
+         gEspNow.sendCallbackFailureCount();
+}
+
+uint32_t currentQueueDropCount() {
+  return gEspNow.droppedSendCount() + gEspNow.droppedReceiveCount();
+}
+
+void observeValidFrame(uint8_t srcAddr, uint16_t sequence, uint8_t packetType) {
+  const uint32_t now = millis();
+  gLinkManager.onFrameReceived(sequence, now);
+  if (packetType ==
+      static_cast<uint8_t>(grut::protocol::PacketType::kHeartbeat)) {
+    gLinkManager.onHeartbeat(now);
+  }
+
+  // Per-observation gap accounting is intentionally NOT threaded through
+  // here yet - LinkManager already tracks aggregate sequence gaps
+  // independently (see LinkManager::sequenceGapCount()), and duplicating
+  // that per-frame into NeighborTable isn't needed for this minimal
+  // step. NeighborTable currently records presence and freshness only.
+  gNeighborTable.onFrameObserved(srcAddr, now);
+}
+
+void observeControlFrame(uint8_t srcAddr, const uint8_t* payload,
+                         size_t payloadLength) {
+  if (srcAddr != grut::kPeerAddr) {
+    return;
+  }
+
+  grut::link::LinkStats decoded;
+  if (grut::link::decodeLinkStats(payload, payloadLength, &decoded)) {
+    gPeerLinkStats = decoded;
+    gHasPeerLinkStats = true;
+    gPeerLinkStatsReceivedMs = millis();
+  }
+}
+
+void updateLinkManager(uint32_t nowMs) {
+  const uint32_t sendFailures = currentSendFailureCount();
+  const uint32_t sendFailureDelta = sendFailures - gObservedSendFailures;
+  if (sendFailureDelta != 0u) {
+    gLinkManager.onSendFailure(sendFailureDelta);
+    gObservedSendFailures = sendFailures;
+  }
+
+  const uint32_t queueDrops = currentQueueDropCount();
+  const uint32_t queueDropDelta = queueDrops - gObservedQueueDrops;
+  if (queueDropDelta != 0u) {
+    gLinkManager.onQueueDrop(queueDropDelta);
+    gObservedQueueDrops = queueDrops;
+  }
+
+  gLinkManager.poll(nowMs);
+}
 
 void sendHeartbeat() {
   grut::protocol::GrutFrameHeader header;
   header.type = static_cast<uint8_t>(grut::protocol::PacketType::kHeartbeat);
   header.srcAddr = grut::kOwnAddr;
   header.dstAddr = grut::kPeerAddr;
+  header.sequence = gSequence.next();
 
   uint8_t frameBuf[grut::protocol::kMaxFrameSizeBytes];
   const size_t frameLen = grut::protocol::encodeFrame(
@@ -75,46 +161,29 @@ void sendHeartbeat() {
   }
 }
 
-void putU32LE(uint8_t* dst, uint32_t v) {
-  dst[0] = static_cast<uint8_t>(v & 0xFF);
-  dst[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
-  dst[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
-  dst[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
-}
-
-// Wire format: 12 uint32 fields, little-endian, in this exact order.
-// Must match FrameReceiver.cpp's parser exactly - see its comment.
-void sendStats() {
-  uint8_t payload[48];
-  size_t off = 0;
-  auto put = [&](uint32_t v) {
-    putU32LE(payload + off, v);
-    off += 4;
-  };
-
-  put(gFrameBuilder.uartBytesRead());
-  put(gFrameBuilder.framesSent());
-  put(gEspNow.sendAttemptedCount());
-  put(gEspNow.sendImmediateErrorCount());
-  put(gEspNow.sendCallbackSuccessCount());
-  put(gEspNow.sendCallbackFailureCount());
-  put(gEspNow.droppedSendCount());
-  put(gEspNow.droppedReceiveCount());
-  put(gFrameReceiver.decodeFailureCount());
-  put(gFrameReceiver.sequenceGapCount());
-  put(gFrameReceiver.uartBytesWritten());
-  put(gFrameReceiver.uartWriteFailureCount());
+void sendLinkStats(uint32_t nowMs) {
+  uint8_t payload[grut::link::kLinkStatsPayloadSize];
+  const grut::link::LinkStats snapshot = gLinkManager.snapshot(nowMs);
+  const size_t payloadLen =
+      grut::link::encodeLinkStats(snapshot, payload, sizeof(payload));
+  if (payloadLen == 0) {
+    return;
+  }
 
   grut::protocol::GrutFrameHeader header;
   header.type = static_cast<uint8_t>(grut::protocol::PacketType::kControl);
   header.srcAddr = grut::kOwnAddr;
   header.dstAddr = grut::kPeerAddr;
+  header.sequence = gSequence.next();
 
   uint8_t frameBuf[grut::protocol::kMaxFrameSizeBytes];
-  const size_t frameLen =
-      grut::protocol::encodeFrame(header, payload, off, frameBuf, sizeof(frameBuf));
+  const size_t frameLen = grut::protocol::encodeFrame(
+      header, payload, payloadLen, frameBuf, sizeof(frameBuf));
   if (frameLen > 0) {
-    gEspNow.send(frameBuf, frameLen);
+    // LINK_STATS is strictly lower priority than transported DATA. If the
+    // radio is busy, skip this snapshot rather than consuming DATA queue
+    // capacity or extending a MAVLink transaction.
+    gEspNow.sendIfIdle(frameBuf, frameLen);
   }
 }
 
@@ -154,8 +223,13 @@ void printLocalStats() {
 void setup() {
   gUart.start();
   gEspNow.start();
+  gLinkManager.reset();
+  gObservedSendFailures = currentSendFailureCount();
+  gObservedQueueDrops = currentQueueDropCount();
   gLastHeartbeatMs = millis();
-  gLastStatsMs = millis();
+  gLastLinkStatsMs = millis();
+  gLastUartActivityMs = millis();
+  gLastObservedUartBytesRead = gFrameBuilder.uartBytesRead();
 }
 
 void loop() {
@@ -164,13 +238,28 @@ void loop() {
   gFrameReceiver.poll();
 
   const unsigned long now = millis();
+  const uint32_t uartBytesRead = gFrameBuilder.uartBytesRead();
+  if (uartBytesRead != gLastObservedUartBytesRead) {
+    gLastObservedUartBytesRead = uartBytesRead;
+    gLastUartActivityMs = now;
+  }
+
   if (now - gLastHeartbeatMs >= kHeartbeatIntervalMs) {
     gLastHeartbeatMs = now;
     sendHeartbeat();
   }
-  if (kDiagnosticsEnabled && now - gLastStatsMs >= kStatsIntervalMs) {
-    gLastStatsMs = now;
-    sendStats();
-    printLocalStats();
+  // Update the passive health model before exporting its snapshot so the
+  // periodic LINK_STATS frame reflects all counters observed this loop.
+  // Still no recovery action is allowed in Step 2.1c.
+  updateLinkManager(static_cast<uint32_t>(now));
+
+  if (now - gLastLinkStatsMs >= kLinkStatsIntervalMs &&
+      now - gLastUartActivityMs >= kLinkStatsUartQuietMs &&
+      gEspNow.txIdle()) {
+    gLastLinkStatsMs = now;
+    sendLinkStats(static_cast<uint32_t>(now));
+    if (kDiagnosticsEnabled) {
+      printLocalStats();
+    }
   }
 }

@@ -16,6 +16,17 @@ namespace transport {
 // lossless delivery guarantee" for v0.2.0.
 class FrameReceiver {
  public:
+  // srcAddr added to ValidFrameObserver (previously sequence+packetType
+  // only) so callers - specifically neighbor::NeighborTable - can learn
+  // which peer a valid frame came from, not just that "the" peer sent
+  // something. In today's fixed two-node topology this is always
+  // grut::kPeerAddr, but the interface itself should not bake that
+  // assumption in.
+  using ValidFrameObserver = void (*)(uint8_t srcAddr, uint16_t sequence,
+                                      uint8_t packetType);
+  using ControlFrameObserver = void (*)(uint8_t srcAddr, const uint8_t* payload,
+                                        size_t payloadLength);
+
   // debugPrintHeartbeats: TEMPORARY bring-up aid only, defaults to
   // false (production behavior: heartbeat/control frames are silently
   // dropped, same as always). When explicitly set true, a received
@@ -34,7 +45,9 @@ class FrameReceiver {
   // debugPrintHeartbeats applies.
   explicit FrameReceiver(EspNowDriver& espNow, UartTransport& uart,
                           bool debugPrintHeartbeats = false,
-                          bool debugPrintStats = false);
+                          bool debugPrintStats = false,
+                          ValidFrameObserver validFrameObserver = nullptr,
+                          ControlFrameObserver controlFrameObserver = nullptr);
 
   // Call every loop() iteration while both espNow and uart are
   // running.
@@ -45,10 +58,10 @@ class FrameReceiver {
   // decodeFailureCount: raw frames that failed FrameCodec::decodeFrame
   //   (bad CRC, wrong version, length mismatch, etc.) - i.e. frames
   //   that made it through ESP-NOW but arrived corrupted or truncated.
-  // sequenceGapCount: kData frames whose header.sequence was not
-  //   exactly one more than the previous kData frame's - each gap
-  //   counts the number of frames apparently missing, so this is a
-  //   count of *lost frames*, not lost gap events.
+  // sequenceGapCount: valid GRUT frames whose header.sequence was not
+  //   exactly one more than the previous valid GRUT frame's. Sequence is
+  //   shared across DATA/HEARTBEAT/CONTROL, so each gap counts the number
+  //   of apparently missing GRUT frames, not lost gap events.
   // uartBytesWritten / uartWriteFailureCount: payload bytes actually
   //   handed to UartTransport::send(), and how many of those calls
   //   returned false (wrote fewer bytes than requested).
@@ -62,6 +75,8 @@ class FrameReceiver {
   UartTransport& uart_;
   bool debugPrintHeartbeats_;
   bool debugPrintStats_;
+  ValidFrameObserver validFrameObserver_;
+  ControlFrameObserver controlFrameObserver_;
 
   bool hasSequence_ = false;
   uint16_t expectedSequence_ = 0;
