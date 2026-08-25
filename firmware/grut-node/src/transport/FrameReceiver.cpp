@@ -27,13 +27,15 @@ constexpr size_t kStatsPayloadBytes = kStatsFieldCount * 4;
 FrameReceiver::FrameReceiver(EspNowDriver& espNow, UartTransport& uart,
                               bool debugPrintHeartbeats, bool debugPrintStats,
                               ValidFrameObserver validFrameObserver,
-                              ControlFrameObserver controlFrameObserver)
+                              ControlFrameObserver controlFrameObserver,
+                              DataSourceFilter dataSourceFilter)
     : espNow_(espNow),
       uart_(uart),
       debugPrintHeartbeats_(debugPrintHeartbeats),
       debugPrintStats_(debugPrintStats),
       validFrameObserver_(validFrameObserver),
-      controlFrameObserver_(controlFrameObserver) {}
+      controlFrameObserver_(controlFrameObserver),
+      dataSourceFilter_(dataSourceFilter) {}
 
 void FrameReceiver::poll() {
   uint8_t rawFrame[grut::protocol::kMaxFrameSizeBytes];
@@ -117,6 +119,15 @@ void FrameReceiver::poll() {
       continue;  // unknown type - reserved, not handled yet
     }
 
+    // Stage 4.2 safety gate: discovery (NeighborTable) is separate from
+    // DATA authorization. A frame can be well-formed, in-sequence, and
+    // from a known/discovered neighbor, and still never reach UART if
+    // it isn't from the configured active DATA peer.
+    if (dataSourceFilter_ != nullptr && !dataSourceFilter_(header.srcAddr)) {
+      ++dataWrongSourceDrops_;
+      continue;
+    }
+
     if (payloadLen > 0) {
       const size_t written = uart_.send(payload, payloadLen) ? payloadLen : 0;
       uartBytesWritten_ += written;
@@ -141,6 +152,10 @@ uint32_t FrameReceiver::uartBytesWritten() const {
 
 uint32_t FrameReceiver::uartWriteFailureCount() const {
   return uartWriteFailures_;
+}
+
+uint32_t FrameReceiver::dataWrongSourceDropCount() const {
+  return dataWrongSourceDrops_;
 }
 
 }  // namespace transport

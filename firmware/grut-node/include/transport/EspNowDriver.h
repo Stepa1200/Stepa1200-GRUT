@@ -29,6 +29,15 @@ namespace transport {
 // two nodes, one driver per node" from ADR 0005.
 class EspNowDriver {
  public:
+  // Stage 4.2 (neighbor discovery): the broadcast MAC, also registered
+  // as a peer in start() so sendBroadcastIfIdle() can target it.
+  // Registering the broadcast peer does not change this driver's
+  // primary fixed-peer relationship (send()/sendIfIdle()/poll() all
+  // still target the constructor's `peerMac` exactly as before) - it
+  // only enables the separate, low-frequency broadcast path used for
+  // discovery.
+  static constexpr uint8_t kBroadcastMac[6] = {0xFF, 0xFF, 0xFF,
+                                                0xFF, 0xFF, 0xFF};
   // channel: shared Wi-Fi channel, fixed for both peers (ADR 0006).
   // peerMac: 6-byte MAC address of the single peer this node talks to.
   EspNowDriver(uint8_t channel, const uint8_t peerMac[6]);
@@ -68,6 +77,14 @@ class EspNowDriver {
   // capacity needed by the transported UART byte stream.
   bool sendIfIdle(const uint8_t* frameBytes, size_t frameLength);
 
+  // Stage 4.2: same "skip rather than queue/retry" philosophy as
+  // sendIfIdle(), but targets kBroadcastMac instead of the fixed
+  // peer - used only for periodic HELLO discovery frames. Bypasses
+  // sendQueue_ entirely (no retry, no backpressure) since a missed
+  // HELLO simply means discovery takes one cycle longer, never a
+  // correctness problem.
+  bool sendBroadcastIfIdle(const uint8_t* frameBytes, size_t frameLength);
+
   // True only when there is no frame currently in flight and the normal
   // send queue is empty. Intended for management/diagnostic scheduling.
   bool txIdle() const;
@@ -93,11 +110,35 @@ class EspNowDriver {
   uint32_t sendCallbackSuccessCount() const;
   uint32_t sendCallbackFailureCount() const;
 
+  // --- sendInFlight_ stall investigation instrumentation (observation
+  // only - does not change scheduling or recovery behavior). ---
+  //
+  // Provisional threshold for counting only, not for any corrective
+  // action. Justified from real ESP8266-specific ESP-NOW measurements
+  // (independent sources report ~7-11ms typical send->callback RTT on
+  // this exact chip) - 100ms is >10x that, so exceeding it indicates a
+  // genuine stall, not ordinary jitter.
+  static constexpr uint32_t kSendInFlightObservationThresholdMs = 100;
+
+  // 0 if nothing is currently in flight; otherwise how long the
+  // current send has been waiting for its callback, as of `nowMs`.
+  uint32_t sendInFlightCurrentAgeMs(uint32_t nowMs) const;
+
+  // Longest observed duration between a send starting and
+  // sendInFlight_ clearing (by any path - immediate error or async
+  // callback), since start().
+  uint32_t sendInFlightMaxAgeMs() const;
+
+  // How many completed sends took longer than
+  // kSendInFlightObservationThresholdMs to clear.
+  uint32_t sendInFlightOverThresholdCount() const;
+
  private:
   static void onSend(uint8_t* macAddr, uint8_t status);
   static void onReceive(uint8_t* macAddr, uint8_t* data, uint8_t length);
 
   void trySendNext();
+  void recordSendInFlightCleared(uint32_t nowMs);
 
   uint8_t channel_;
   uint8_t peerMac_[6];
@@ -111,6 +152,10 @@ class EspNowDriver {
   uint32_t sendImmediateErrors_ = 0;
   uint32_t sendCallbackSuccesses_ = 0;
   uint32_t sendCallbackFailures_ = 0;
+
+  uint32_t sendInFlightStartMs_ = 0;
+  uint32_t sendInFlightMaxAgeMs_ = 0;
+  uint32_t sendInFlightOverThresholdCount_ = 0;
 };
 
 }  // namespace transport

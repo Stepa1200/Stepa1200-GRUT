@@ -10,6 +10,7 @@
 
 #include "FrameCodec.h"
 #include "GrutProtocol.h"
+#include "HelloCodec.h"
 #include "LinkManager.h"
 #include "LinkStatsCodec.h"
 #include "NeighborTable.h"
@@ -39,7 +40,18 @@ constexpr unsigned long kHeartbeatIntervalMs =
 constexpr unsigned long kLinkStatsIntervalMs = 3000;
 // LINK_STATS is management telemetry and must never compete with active UART
 // transport. Require a short local-UART quiet window before a best-effort send.
-constexpr unsigned long kLinkStatsUartQuietMs = 100;
+constexpr unsigned long kLinkStatsUartQuietMs = 500;
+
+// Stage 4.2 (neighbor discovery): periodic broadcast HELLO interval.
+// Deliberately much less frequent than heartbeat (1s) - discovery does
+// not need to be instant, and every extra periodic broadcast is more
+// contention for the single shared ESP-NOW send slot (see the
+// LINK_STATS/parameter-load regression investigation). 2000ms is a
+// first, provisional choice, not derived from a specific measurement -
+// open to tuning once multi-node hardware testing exists. HELLO reuses
+// kLinkStatsUartQuietMs's exact gating (quiet UART + txIdle) for the
+// same reason LINK_STATS does.
+constexpr unsigned long kHelloIntervalMs = 2000;
 
 // Master switch for ALL diagnostic UART writes (both the received-stats
 // print in FrameReceiver and printLocalStats() below). OFF by default:
@@ -61,6 +73,17 @@ void observeValidFrame(uint8_t srcAddr, uint16_t sequence, uint8_t packetType);
 void observeControlFrame(uint8_t srcAddr, const uint8_t* payload,
                          size_t payloadLength);
 
+// Stage 4.2 safety gate: the ONLY srcAddr whose kData frames may reach
+// this node's UART. Deliberately reuses grut::kPeerAddr - the same
+// static, configured peer identity already used for HEARTBEAT/DATA/
+// LINK_STATS unicast - rather than introducing a second, separate
+// "active peer" identity source. NeighborTable (fed by HELLO and any
+// other valid frame, from any address) is not consulted here at all:
+// being discovered is not the same as being authorized to write UART.
+bool acceptDataSource(uint8_t srcAddr) {
+  return srcAddr == grut::kPeerAddr;
+}
+
 // TEMPORARY: turn both back to false once done - see FrameReceiver.h
 // for why writing unsolicited bytes to UART is unsafe once real
 // MAVLink/data traffic is flowing on this same line. Both are now
@@ -73,10 +96,12 @@ grut::transport::FrameReceiver gFrameReceiver(
     /*debugPrintHeartbeats=*/false,
     /*debugPrintStats=*/kDiagnosticsEnabled,
     /*validFrameObserver=*/&observeValidFrame,
-    /*controlFrameObserver=*/&observeControlFrame);
+    /*controlFrameObserver=*/&observeControlFrame,
+    /*dataSourceFilter=*/&acceptDataSource);
 
 unsigned long gLastHeartbeatMs = 0;
 unsigned long gLastLinkStatsMs = 0;
+unsigned long gLastHelloMs = 0;
 unsigned long gLastUartActivityMs = 0;
 uint32_t gLastObservedUartBytesRead = 0;
 uint32_t gObservedSendFailures = 0;
@@ -105,18 +130,33 @@ void observeValidFrame(uint8_t srcAddr, uint16_t sequence, uint8_t packetType) {
       static_cast<uint8_t>(grut::protocol::PacketType::kHeartbeat)) {
     gLinkManager.onHeartbeat(now);
   }
-
-  // Per-observation gap accounting is intentionally NOT threaded through
-  // here yet - LinkManager already tracks aggregate sequence gaps
-  // independently (see LinkManager::sequenceGapCount()), and duplicating
-  // that per-frame into NeighborTable isn't needed for this minimal
-  // step. NeighborTable currently records presence and freshness only.
   gNeighborTable.onFrameObserved(srcAddr, now);
 }
 
 void observeControlFrame(uint8_t srcAddr, const uint8_t* payload,
                          size_t payloadLength) {
+  // Stage 4.2: kControl now carries two subtypes (see HelloCodec.h /
+  // LinkStatsCodec.h). NeighborTable itself is already updated for
+  // HELLO frames via the generic observeValidFrame() path above (it
+  // updates for every valid GRUT frame, any type) - this function's
+  // only remaining job is subtype-specific payload handling.
+  if (payloadLength == 0) {
+    return;
+  }
+
+  if (grut::discovery::decodeHello(payload, payloadLength)) {
+    // Discovery only - identity (srcAddr) already recorded by
+    // observeValidFrame(). Nothing further to do; HELLO carries no
+    // other fields by design.
+    return;
+  }
+
   if (srcAddr != grut::kPeerAddr) {
+    // LINK_STATS is only meaningful from this node's own fixed link
+    // peer (gPeerLinkStats models exactly one remote LinkManager
+    // snapshot) - a HELLO from any other node was already handled
+    // above and returned; anything else from a non-peer address is
+    // ignored here rather than guessed at.
     return;
   }
 
@@ -187,6 +227,31 @@ void sendLinkStats(uint32_t nowMs) {
   }
 }
 
+void sendHello() {
+  uint8_t payload[grut::discovery::kHelloPayloadSize];
+  const size_t payloadLen =
+      grut::discovery::encodeHello(payload, sizeof(payload));
+  if (payloadLen == 0) {
+    return;
+  }
+
+  grut::protocol::GrutFrameHeader header;
+  header.type = static_cast<uint8_t>(grut::protocol::PacketType::kControl);
+  header.flags = grut::protocol::kFlagBroadcast;
+  header.srcAddr = grut::kOwnAddr;
+  header.dstAddr = grut::protocol::kBroadcastAddress;
+  header.sequence = gSequence.next();
+
+  uint8_t frameBuf[grut::protocol::kMaxFrameSizeBytes];
+  const size_t frameLen = grut::protocol::encodeFrame(
+      header, payload, payloadLen, frameBuf, sizeof(frameBuf));
+  if (frameLen > 0) {
+    // Same "skip rather than contend" philosophy as LINK_STATS -
+    // discovery must never compete with transported DATA.
+    gEspNow.sendBroadcastIfIdle(frameBuf, frameLen);
+  }
+}
+
 // TEMPORARY diagnostic aid: print THIS node's own counters directly to
 // its own UART - no ESP-NOW round trip, no dependence on the (observed
 // to be unreliable on ESP8266) send-callback status. This is the
@@ -228,6 +293,7 @@ void setup() {
   gObservedQueueDrops = currentQueueDropCount();
   gLastHeartbeatMs = millis();
   gLastLinkStatsMs = millis();
+  gLastHelloMs = millis();
   gLastUartActivityMs = millis();
   gLastObservedUartBytesRead = gFrameBuilder.uartBytesRead();
 }
@@ -261,5 +327,12 @@ void loop() {
     if (kDiagnosticsEnabled) {
       printLocalStats();
     }
+  }
+
+  if (now - gLastHelloMs >= kHelloIntervalMs &&
+      now - gLastUartActivityMs >= kLinkStatsUartQuietMs &&
+      gEspNow.txIdle()) {
+    gLastHelloMs = now;
+    sendHello();
   }
 }

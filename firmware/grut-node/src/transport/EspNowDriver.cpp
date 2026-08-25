@@ -57,6 +57,19 @@ bool EspNowDriver::start() {
     return false;
   }
 
+  // Stage 4.2: register the broadcast MAC too, per Espressif's own
+  // guidance ("a device with broadcast MAC address must be added
+  // before sending broadcast data"). This does not change anything
+  // about the fixed-peer relationship above - it only enables
+  // sendBroadcastIfIdle() for discovery. Deliberately not fatal if
+  // this fails: broadcast discovery is best-effort by design (see
+  // sendBroadcastIfIdle()), so a node that couldn't register the
+  // broadcast peer still starts up and works normally as before,
+  // simply without outbound HELLO capability this run.
+  uint8_t broadcastMac[6];
+  std::memcpy(broadcastMac, kBroadcastMac, sizeof(broadcastMac));
+  esp_now_add_peer(broadcastMac, ESP_NOW_ROLE_COMBO, channel_, nullptr, 0);
+
   sendInFlight_ = false;
   running_ = true;
   return true;
@@ -68,6 +81,11 @@ void EspNowDriver::stop() {
   }
 
   esp_now_del_peer(peerMac_);
+  {
+    uint8_t broadcastMac[6];
+    std::memcpy(broadcastMac, kBroadcastMac, sizeof(broadcastMac));
+    esp_now_del_peer(broadcastMac);
+  }
   esp_now_unregister_send_cb();
   esp_now_unregister_recv_cb();
   esp_now_deinit();
@@ -116,6 +134,41 @@ bool EspNowDriver::sendIfIdle(const uint8_t* frameBytes, size_t frameLength) {
   return true;
 }
 
+bool EspNowDriver::sendBroadcastIfIdle(const uint8_t* frameBytes,
+                                       size_t frameLength) {
+  // Same idle gate as sendIfIdle(): never contend with a DATA burst or
+  // an already in-flight send. Bypasses sendQueue_ entirely - a missed
+  // HELLO cycle is harmless (the next periodic attempt tries again),
+  // so there is nothing to queue or retry.
+  if (!running_ || sendInFlight_ || !sendQueue_.empty()) {
+    return false;
+  }
+
+  uint8_t buffer[FrameQueue::kMaxFrameBytes];
+  if (frameLength > sizeof(buffer)) {
+    return false;
+  }
+  std::memcpy(buffer, frameBytes, frameLength);
+
+  uint8_t broadcastMac[6];
+  std::memcpy(broadcastMac, kBroadcastMac, sizeof(broadcastMac));
+
+  sendInFlight_ = true;
+  sendInFlightStartMs_ = millis();
+  ++sendAttempted_;
+
+  const int result =
+      esp_now_send(broadcastMac, buffer, static_cast<int>(frameLength));
+  if (result != 0) {
+    // Same reasoning as trySendNext(): no callback will fire for a
+    // send esp_now_send() itself rejected, so clear immediately.
+    sendInFlight_ = false;
+    ++sendImmediateErrors_;
+    recordSendInFlightCleared(millis());
+  }
+  return result == 0;
+}
+
 bool EspNowDriver::txIdle() const {
   return !sendInFlight_ && sendQueue_.empty();
 }
@@ -161,6 +214,7 @@ void EspNowDriver::trySendNext() {
   }
 
   sendInFlight_ = true;
+  sendInFlightStartMs_ = millis();
   ++sendAttempted_;
 
   const int result = esp_now_send(peerMac_, buffer, static_cast<int>(length));
@@ -172,6 +226,7 @@ void EspNowDriver::trySendNext() {
     // and eventually be dropped once the (never-draining) queue fills.
     sendInFlight_ = false;
     ++sendImmediateErrors_;
+    recordSendInFlightCleared(millis());
   }
 }
 
@@ -179,7 +234,8 @@ void EspNowDriver::onSend(uint8_t* /*macAddr*/, uint8_t status) {
   // ADR 0005: callback must stay minimal - no UART, no parsing, no
   // logging, no retransmission. Just clear the in-flight flag so
   // poll() can send the next queued frame, if any, and tally the
-  // result for diagnostics.
+  // result for diagnostics. recordSendInFlightCleared() is O(1)
+  // arithmetic on already-in-memory fields - no allocation, no I/O.
   if (g_activeDriver != nullptr) {
     g_activeDriver->sendInFlight_ = false;
     if (status == 0) {
@@ -187,7 +243,33 @@ void EspNowDriver::onSend(uint8_t* /*macAddr*/, uint8_t status) {
     } else {
       ++g_activeDriver->sendCallbackFailures_;
     }
+    g_activeDriver->recordSendInFlightCleared(millis());
   }
+}
+
+void EspNowDriver::recordSendInFlightCleared(uint32_t nowMs) {
+  const uint32_t age = nowMs - sendInFlightStartMs_;
+  if (age > sendInFlightMaxAgeMs_) {
+    sendInFlightMaxAgeMs_ = age;
+  }
+  if (age > kSendInFlightObservationThresholdMs) {
+    ++sendInFlightOverThresholdCount_;
+  }
+}
+
+uint32_t EspNowDriver::sendInFlightCurrentAgeMs(uint32_t nowMs) const {
+  if (!sendInFlight_) {
+    return 0;
+  }
+  return nowMs - sendInFlightStartMs_;
+}
+
+uint32_t EspNowDriver::sendInFlightMaxAgeMs() const {
+  return sendInFlightMaxAgeMs_;
+}
+
+uint32_t EspNowDriver::sendInFlightOverThresholdCount() const {
+  return sendInFlightOverThresholdCount_;
 }
 
 void EspNowDriver::onReceive(uint8_t* /*macAddr*/, uint8_t* data,

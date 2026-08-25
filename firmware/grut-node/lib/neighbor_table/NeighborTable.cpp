@@ -55,8 +55,6 @@ bool NeighborTable::isFresh(uint8_t address, uint32_t nowMs,
   if (idx < 0) {
     return false;
   }
-  // Unsigned subtraction wraps correctly even across millis() rollover,
-  // matching the pattern already used in link::LinkManager.
   const uint32_t age = nowMs - entries_[idx].lastSeenMs;
   return age <= staleAfterMs;
 }
@@ -67,6 +65,13 @@ size_t NeighborTable::count() const {
 
 uint32_t NeighborTable::droppedNewNeighborCount() const {
   return droppedNewNeighbors_;
+}
+
+NeighborInfo NeighborTable::getByIndex(size_t index) const {
+  if (index >= count_) {
+    return NeighborInfo{};
+  }
+  return entries_[index];
 }
 
 void NeighborTable::reset() {

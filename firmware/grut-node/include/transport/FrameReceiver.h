@@ -16,16 +16,24 @@ namespace transport {
 // lossless delivery guarantee" for v0.2.0.
 class FrameReceiver {
  public:
-  // srcAddr added to ValidFrameObserver (previously sequence+packetType
-  // only) so callers - specifically neighbor::NeighborTable - can learn
-  // which peer a valid frame came from, not just that "the" peer sent
-  // something. In today's fixed two-node topology this is always
-  // grut::kPeerAddr, but the interface itself should not bake that
-  // assumption in.
   using ValidFrameObserver = void (*)(uint8_t srcAddr, uint16_t sequence,
                                       uint8_t packetType);
   using ControlFrameObserver = void (*)(uint8_t srcAddr, const uint8_t* payload,
                                         size_t payloadLength);
+
+  // Stage 4.2 safety gate: called only for kData frames, before any
+  // UART write. Returning false drops the frame silently (counted by
+  // dataWrongSourceDropCount()) - the payload never reaches UART.
+  // FrameReceiver does not know or care WHY an address is accepted or
+  // rejected; that policy is supplied by the caller (bridge_main.cpp,
+  // using its own configured grut::kPeerAddr) and is NOT
+  // NeighborTable's responsibility - discovery (which nodes are
+  // visible) and DATA authorization (which node's bytes reach UART)
+  // are deliberately separate concerns. Defaults to nullptr, meaning
+  // "accept every source" - the exact behavior before this gate
+  // existed, so any caller that doesn't opt in sees zero behavior
+  // change.
+  using DataSourceFilter = bool (*)(uint8_t srcAddr);
 
   // debugPrintHeartbeats: TEMPORARY bring-up aid only, defaults to
   // false (production behavior: heartbeat/control frames are silently
@@ -47,7 +55,8 @@ class FrameReceiver {
                           bool debugPrintHeartbeats = false,
                           bool debugPrintStats = false,
                           ValidFrameObserver validFrameObserver = nullptr,
-                          ControlFrameObserver controlFrameObserver = nullptr);
+                          ControlFrameObserver controlFrameObserver = nullptr,
+                          DataSourceFilter dataSourceFilter = nullptr);
 
   // Call every loop() iteration while both espNow and uart are
   // running.
@@ -65,10 +74,15 @@ class FrameReceiver {
   // uartBytesWritten / uartWriteFailureCount: payload bytes actually
   //   handed to UartTransport::send(), and how many of those calls
   //   returned false (wrote fewer bytes than requested).
+  // dataWrongSourceDropCount: valid, well-formed kData frames rejected
+  //   only because DataSourceFilter (if supplied) returned false for
+  //   their srcAddr - i.e. discovered-but-not-authorized traffic. Zero
+  //   if no filter was supplied.
   uint32_t decodeFailureCount() const;
   uint32_t sequenceGapCount() const;
   uint32_t uartBytesWritten() const;
   uint32_t uartWriteFailureCount() const;
+  uint32_t dataWrongSourceDropCount() const;
 
  private:
   EspNowDriver& espNow_;
@@ -77,6 +91,7 @@ class FrameReceiver {
   bool debugPrintStats_;
   ValidFrameObserver validFrameObserver_;
   ControlFrameObserver controlFrameObserver_;
+  DataSourceFilter dataSourceFilter_;
 
   bool hasSequence_ = false;
   uint16_t expectedSequence_ = 0;
@@ -85,6 +100,7 @@ class FrameReceiver {
   uint32_t sequenceGaps_ = 0;
   uint32_t uartBytesWritten_ = 0;
   uint32_t uartWriteFailures_ = 0;
+  uint32_t dataWrongSourceDrops_ = 0;
 };
 
 }  // namespace transport

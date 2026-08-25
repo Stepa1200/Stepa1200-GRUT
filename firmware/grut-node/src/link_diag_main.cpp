@@ -118,15 +118,31 @@ void processReceivedFrames(uint32_t nowMs) {
       continue;
     }
 
-    // This diagnostic has one fixed ESP-NOW peer. Still ignore a valid GRUT
-    // frame whose protocol addresses do not target this node/broadcast.
-    if (header.srcAddr != grut::kPeerAddr ||
-        (header.dstAddr != grut::kOwnAddr && header.dstAddr != 0xFFu)) {
+    // Stage 4.2 fix: NeighborTable (discovery) and LinkManager (link
+    // health for the one fixed peer) have different scopes and must
+    // not share one filter. A frame not addressed to us/broadcast is
+    // never relevant to either and is dropped up front. Beyond that,
+    // ANY valid srcAddr updates NeighborTable (that is the whole
+    // point of discovery, e.g. AIR2 broadcasting HELLO); only frames
+    // from grut::kPeerAddr are fed to gLinkManager, since LinkManager
+    // models exactly one fixed peer relationship and has no meaning
+    // for any other address. Previously this used a single combined
+    // filter that rejected anything not from kPeerAddr BEFORE
+    // gNeighborTable.onFrameObserved() ever ran - silently hiding
+    // every other node from discovery, confirmed on real hardware
+    // (AIR2's HELLO never appeared as a NEIGHBOR line despite AIR2
+    // being powered and correctly flashed).
+    if (header.dstAddr != grut::kOwnAddr && header.dstAddr != 0xFFu) {
+      continue;
+    }
+
+    gNeighborTable.onFrameObserved(header.srcAddr, nowMs);
+
+    if (header.srcAddr != grut::kPeerAddr) {
       continue;
     }
 
     gLinkManager.onFrameReceived(header.sequence, nowMs);
-    gNeighborTable.onFrameObserved(header.srcAddr, nowMs);
 
     if (header.type ==
         static_cast<uint8_t>(grut::protocol::PacketType::kHeartbeat)) {
@@ -199,33 +215,57 @@ void printSnapshot(uint32_t nowMs) {
 }
 
 void printNeighbors(uint32_t nowMs) {
-  // Today's topology is fixed 1-to-1, so the only address that can ever
-  // appear in NeighborTable is grut::kPeerAddr (a compile-time
-  // constant already used elsewhere in this file - see
-  // processReceivedFrames()). This means the existing get(address) API
-  // is sufficient here; NeighborTable itself needs no changes and no
-  // enumeration method. Revisit this once a real multi-neighbor
-  // topology exists.
-  const grut::neighbor::NeighborInfo info = gNeighborTable.get(grut::kPeerAddr);
-  if (!info.known) {
+  const size_t total = gNeighborTable.count();
+  if (total == 0) {
     writeLine("NEIGHBOR none");
     return;
   }
 
-  const uint32_t age = nowMs - info.lastSeenMs;
-  const bool alive = gNeighborTable.isFresh(info.address, nowMs);
+  for (size_t i = 0; i < total; ++i) {
+    const grut::neighbor::NeighborInfo info = gNeighborTable.getByIndex(i);
+    if (!info.known) {
+      continue;  // shouldn't happen for i < count(), but never trust blindly
+    }
 
-  // LinkState is not stored in NeighborTable (that would duplicate
-  // LinkManager's job - see NeighborTable.h). This diagnostic firmware
-  // has exactly one LinkManager instance for this single fixed peer,
-  // so it is safe to report gLinkManager's state alongside this entry.
-  char line[112];
-  snprintf(line, sizeof(line), "NEIGHBOR id=%u age=%lu alive=%u rx=%lu gaps=%lu state=%s",
-           static_cast<unsigned>(info.address),
-           static_cast<unsigned long>(age), alive ? 1 : 0,
-           static_cast<unsigned long>(info.rxFrames),
-           static_cast<unsigned long>(info.sequenceGaps),
-           stateName(gLinkManager.state()));
+    const uint32_t age = nowMs - info.lastSeenMs;
+    const bool alive = gNeighborTable.isFresh(info.address, nowMs);
+
+    // LinkState is not stored in NeighborTable (that would duplicate
+    // LinkManager's job). This diagnostic firmware has exactly one
+    // LinkManager instance, scoped to grut::kPeerAddr - state is only
+    // meaningful for that one address; any other discovered neighbor
+    // (e.g. AIR2) prints "n/a" rather than guessing at a health state
+    // LinkManager never actually tracked for it.
+    const char* state = (info.address == grut::kPeerAddr)
+                             ? stateName(gLinkManager.state())
+                             : "n/a";
+
+    char line[112];
+    snprintf(line, sizeof(line), "NEIGHBOR id=%u age=%lu alive=%u rx=%lu gaps=%lu state=%s",
+             static_cast<unsigned>(info.address),
+             static_cast<unsigned long>(age), alive ? 1 : 0,
+             static_cast<unsigned long>(info.rxFrames),
+             static_cast<unsigned long>(info.sequenceGaps), state);
+    writeLine(line);
+  }
+}
+
+void printSendInFlightStats(uint32_t nowMs) {
+  char line[176];
+  snprintf(
+      line, sizeof(line),
+      "SENDINFLIGHT start=%lu cbOk=%lu cbFail=%lu cb=%lu curAge=%lu "
+      "maxAge=%lu overThresh=%lu thresholdMs=%lu",
+      static_cast<unsigned long>(gEspNow.sendAttemptedCount()),
+      static_cast<unsigned long>(gEspNow.sendCallbackSuccessCount()),
+      static_cast<unsigned long>(gEspNow.sendCallbackFailureCount()),
+      static_cast<unsigned long>(gEspNow.sendCallbackSuccessCount() +
+                                  gEspNow.sendCallbackFailureCount()),
+      static_cast<unsigned long>(gEspNow.sendInFlightCurrentAgeMs(nowMs)),
+      static_cast<unsigned long>(gEspNow.sendInFlightMaxAgeMs()),
+      static_cast<unsigned long>(gEspNow.sendInFlightOverThresholdCount()),
+      static_cast<unsigned long>(
+          grut::transport::EspNowDriver::kSendInFlightObservationThresholdMs));
   writeLine(line);
 }
 
@@ -281,5 +321,6 @@ void loop() {
     gLastPrintMs = now;
     printSnapshot(now);
     printNeighbors(now);
+    printSendInFlightStats(now);
   }
 }

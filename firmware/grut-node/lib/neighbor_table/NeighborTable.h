@@ -9,22 +9,17 @@ namespace neighbor {
 // NeighborTable: in-RAM knowledge of directly observed neighbors.
 //
 // Deliberately separate from link::LinkManager (link health only, one
-// fixed peer) and from any future Routing/Relay/Mesh layer (not yet
-// implemented - see docs/ADR/0007-link-manager-v1.md's roadmap notes).
-// This class only records "what have I directly heard, and when" - it
-// has no opinion on link health, recovery, or what to do with that
+// fixed peer) and from any future Routing/Relay/Mesh layer. This class
+// only records "what have I directly heard, and when" - it has no
+// opinion on link health, recovery, or what to do with that
 // information.
 //
 // Keyed by GRUT protocol address (GrutFrameHeader::srcAddr), not MAC:
 // FrameReceiver's observer callbacks only expose the GRUT address, not
-// the underlying ESP-NOW MAC (that lives one layer down, in
-// EspNowDriver, and is not currently threaded up through the observer
-// interface). Exposing MAC here would require a separate,
-// larger interface change and is out of scope for this minimal core.
+// the underlying ESP-NOW MAC.
 //
 // No dynamic allocation: a fixed-size array sized for a small future
-// neighbor count, not just today's single fixed peer - this table is
-// meant to outlive the current two-node topology.
+// neighbor count, not just today's single fixed peer.
 struct NeighborInfo {
   uint8_t address = 0;
   bool known = false;
@@ -38,28 +33,19 @@ class NeighborTable {
   static constexpr size_t kMaxNeighbors = 8;
 
   // A neighbor is considered fresh only if it was last observed within
-  // this many milliseconds of "now" - see the class comment on why
-  // staleness must be explicit (a hardware test showed a peer's
-  // self-reported state can be many seconds stale and must not be
-  // trusted as current).
+  // this many milliseconds of "now".
   static constexpr uint32_t kDefaultStaleAfterMs = 5000;
 
   NeighborTable();
 
   // Records that a valid GRUT frame was received from `address` at
   // `nowMs`. `gapCount` is the number of apparently-missing frames
-  // associated with this observation (0 for none) - callers typically
-  // pass whatever their sequence-gap accounting already computed for
-  // this frame (e.g. link::LinkManager's own gap logic), so this table
-  // does not duplicate that math itself.
+  // associated with this observation (0 for none).
   //
   // If `address` is not yet known and the table is full
   // (count() == kMaxNeighbors), the observation is dropped and
   // droppedNewNeighborCount() is incremented - existing neighbors are
-  // never evicted to make room. This is a deliberate simplification
-  // for v1: with today's fixed two-node topology this can never
-  // actually happen, and a real eviction policy needs its own design
-  // once multi-neighbor topologies are in scope.
+  // never evicted to make room.
   void onFrameObserved(uint8_t address, uint32_t nowMs,
                        uint32_t gapCount = 0);
 
@@ -69,13 +55,21 @@ class NeighborTable {
   NeighborInfo get(uint8_t address) const;
 
   // True only if `address` is known AND was last observed within
-  // `staleAfterMs` of `nowMs`. Never treat a neighbor as usable without
-  // checking this first - see the class comment.
+  // `staleAfterMs` of `nowMs`.
   bool isFresh(uint8_t address, uint32_t nowMs,
                uint32_t staleAfterMs = kDefaultStaleAfterMs) const;
 
   size_t count() const;
   uint32_t droppedNewNeighborCount() const;
+
+  // Enumeration support: valid indices are [0, count()). Returns a
+  // default-constructed (known == false) NeighborInfo for any
+  // out-of-range index. Entries are in insertion order (first-observed
+  // first), stable - existing entries are never reordered or evicted.
+  // Re-added for Stage 4.2's linkdiag visibility: showing more than
+  // one discovered neighbor requires enumeration, not just get(addr)
+  // for one already-known address.
+  NeighborInfo getByIndex(size_t index) const;
 
   void reset();
 
