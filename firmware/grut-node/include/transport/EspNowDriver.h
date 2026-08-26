@@ -187,6 +187,22 @@ class EspNowDriver {
   uint32_t addressMacConflictCount() const;
   uint32_t rebindCount() const;
 
+  // Read-only snapshot of one binding, for diagnostics only (linkdiag).
+  // Not used by any send/receive/routing path - those go through
+  // lookupPeerMac()/sendToPeer() instead.
+  struct BindingInfo {
+    uint8_t grutAddr = 0;
+    bool known = false;
+    uint8_t mac[6] = {};
+    uint32_t lastSeenMs = 0;
+  };
+
+  // Valid indices are [0, peerBindingCount()). Returns a
+  // default-constructed (known == false) BindingInfo for any
+  // out-of-range index. Same insertion-order/no-eviction guarantee as
+  // NeighborTable::getByIndex().
+  BindingInfo getBindingByIndex(size_t index) const;
+
   // Sends to whatever MAC is currently bound to nextHopAddr. Returns
   // false immediately - no queuing, no retry, no fallback guess - if
   // no binding exists yet, or if a send is already in flight, or the

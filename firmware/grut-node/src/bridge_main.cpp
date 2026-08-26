@@ -14,6 +14,7 @@
 #include "LinkManager.h"
 #include "LinkStatsCodec.h"
 #include "NeighborTable.h"
+#include "RouteTable.h"
 #include "grut/NodeConfig.h"
 #include "transport/EspNowDriver.h"
 #include "transport/FrameBuilder.h"
@@ -68,6 +69,7 @@ grut::transport::FrameBuilder gFrameBuilder(gUart, gEspNow, gSequence,
                                              grut::kOwnAddr, grut::kPeerAddr);
 grut::link::LinkManager gLinkManager;
 grut::neighbor::NeighborTable gNeighborTable;
+grut::routing::RouteTable gRouteTable;
 
 void observeValidFrame(uint8_t srcAddr, uint16_t sequence, uint8_t packetType);
 void observeControlFrame(uint8_t srcAddr, const uint8_t* payload,
@@ -131,6 +133,16 @@ void observeValidFrame(uint8_t srcAddr, uint16_t sequence, uint8_t packetType) {
     gLinkManager.onHeartbeat(now);
   }
   gNeighborTable.onFrameObserved(srcAddr, now);
+
+  // Stage 5.1: every directly-heard neighbor is, by definition, one
+  // hop away from us - record that as a direct route. This wiring
+  // lives here (application layer), not inside NeighborTable or
+  // RouteTable themselves: NeighborTable stays carrier/routing-
+  // independent, and RouteTable stays a generic destination->nextHop
+  // store that doesn't know what a "neighbor" is. No forwarding, no
+  // relay, no route selection happens anywhere yet - this only
+  // populates the table.
+  gRouteTable.upsert(srcAddr, /*nextHop=*/srcAddr, /*hopCount=*/1, now);
 }
 
 void observeControlFrame(uint8_t srcAddr, const uint8_t* payload,

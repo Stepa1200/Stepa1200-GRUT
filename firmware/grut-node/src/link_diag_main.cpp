@@ -13,6 +13,7 @@
 #include "LinkManager.h"
 #include "LinkStatsCodec.h"
 #include "NeighborTable.h"
+#include "RouteTable.h"
 #include "grut/NodeConfig.h"
 #include "grut/PhysicalUart.h"
 #include "transport/EspNowDriver.h"
@@ -29,6 +30,7 @@ grut::transport::EspNowDriver gEspNow(kEspNowChannel, grut::kPeerMac);
 grut::transport::SequenceGenerator gSequence;
 grut::link::LinkManager gLinkManager;
 grut::neighbor::NeighborTable gNeighborTable;
+grut::routing::RouteTable gRouteTable;
 
 grut::link::LinkState gLastPrintedState = grut::link::LinkState::kUnknown;
 uint32_t gLastHeartbeatTxMs = 0;
@@ -138,6 +140,8 @@ void processReceivedFrames(uint32_t nowMs) {
     }
 
     gNeighborTable.onFrameObserved(header.srcAddr, nowMs);
+    gRouteTable.upsert(header.srcAddr, /*nextHop=*/header.srcAddr,
+                       /*hopCount=*/1, nowMs);
     gEspNow.recordPeerBinding(header.srcAddr, sourceMac);
 
     if (header.srcAddr != grut::kPeerAddr) {
@@ -252,6 +256,59 @@ void printNeighbors(uint32_t nowMs) {
   }
 }
 
+void printPeerBindings(uint32_t nowMs) {
+  const size_t total = gEspNow.peerBindingCount();
+  if (total == 0) {
+    writeLine("BINDING none");
+  }
+  for (size_t i = 0; i < total; ++i) {
+    const grut::transport::EspNowDriver::BindingInfo info =
+        gEspNow.getBindingByIndex(i);
+    if (!info.known) {
+      continue;
+    }
+    const uint32_t age = nowMs - info.lastSeenMs;
+    char line[112];
+    snprintf(line, sizeof(line),
+             "BINDING addr=%u mac=%02X:%02X:%02X:%02X:%02X:%02X age=%lu",
+             static_cast<unsigned>(info.grutAddr), info.mac[0], info.mac[1],
+             info.mac[2], info.mac[3], info.mac[4], info.mac[5],
+             static_cast<unsigned long>(age));
+    writeLine(line);
+  }
+
+  char summary[112];
+  snprintf(summary, sizeof(summary),
+           "BINDING_STATS count=%lu dropped=%lu conflicts=%lu rebinds=%lu",
+           static_cast<unsigned long>(total),
+           static_cast<unsigned long>(gEspNow.droppedNewBindingCount()),
+           static_cast<unsigned long>(gEspNow.addressMacConflictCount()),
+           static_cast<unsigned long>(gEspNow.rebindCount()));
+  writeLine(summary);
+}
+
+void printRoutes(uint32_t nowMs) {
+  const size_t total = gRouteTable.count();
+  if (total == 0) {
+    writeLine("ROUTE none");
+  }
+  for (size_t i = 0; i < total; ++i) {
+    const grut::routing::RouteEntry entry = gRouteTable.getByIndex(i);
+    if (!entry.valid) {
+      continue;
+    }
+    const uint32_t age = nowMs - entry.lastUpdatedMs;
+    char line[112];
+    snprintf(line, sizeof(line),
+             "ROUTE dest=%u nextHop=%u hop=%u age=%lu",
+             static_cast<unsigned>(entry.destination),
+             static_cast<unsigned>(entry.nextHop),
+             static_cast<unsigned>(entry.hopCount),
+             static_cast<unsigned long>(age));
+    writeLine(line);
+  }
+}
+
 void printSendInFlightStats(uint32_t nowMs) {
   char line[176];
   snprintf(
@@ -323,6 +380,8 @@ void loop() {
     gLastPrintMs = now;
     printSnapshot(now);
     printNeighbors(now);
+    printPeerBindings(now);
+    printRoutes(now);
     printSendInFlightStats(now);
   }
 }

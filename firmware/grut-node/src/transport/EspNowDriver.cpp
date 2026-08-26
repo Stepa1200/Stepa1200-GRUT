@@ -363,6 +363,18 @@ uint32_t EspNowDriver::rebindCount() const {
   return rebinds_;
 }
 
+EspNowDriver::BindingInfo EspNowDriver::getBindingByIndex(size_t index) const {
+  if (index >= peerBindingCount_ || !peerBindings_[index].known) {
+    return BindingInfo{};
+  }
+  BindingInfo info;
+  info.grutAddr = peerBindings_[index].grutAddr;
+  info.known = true;
+  std::memcpy(info.mac, peerBindings_[index].mac, sizeof(info.mac));
+  info.lastSeenMs = peerBindings_[index].lastSeenMs;
+  return info;
+}
+
 bool EspNowDriver::sendToPeer(uint8_t nextHopAddr, const uint8_t* frameBytes,
                               size_t frameLength) {
   uint8_t mac[6];
