@@ -174,8 +174,8 @@ bool EspNowDriver::txIdle() const {
 }
 
 bool EspNowDriver::receive(uint8_t* outBuffer, size_t outCapacity,
-                            size_t* outLength) {
-  return recvQueue_.pop(outBuffer, outCapacity, outLength);
+                            size_t* outLength, uint8_t* outMac) {
+  return recvQueue_.pop(outBuffer, outCapacity, outLength, outMac);
 }
 
 uint32_t EspNowDriver::droppedSendCount() const {
@@ -272,13 +272,135 @@ uint32_t EspNowDriver::sendInFlightOverThresholdCount() const {
   return sendInFlightOverThresholdCount_;
 }
 
-void EspNowDriver::onReceive(uint8_t* /*macAddr*/, uint8_t* data,
+int EspNowDriver::findBindingIndex(uint8_t grutAddr) const {
+  for (size_t i = 0; i < peerBindingCount_; ++i) {
+    if (peerBindings_[i].known && peerBindings_[i].grutAddr == grutAddr) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+void EspNowDriver::recordPeerBinding(uint8_t grutAddr, const uint8_t* mac) {
+  const uint32_t nowMs = millis();
+  const int idx = findBindingIndex(grutAddr);
+
+  if (idx < 0) {
+    // Case 1: new GRUT address.
+    if (peerBindingCount_ >= kMaxPeerBindings) {
+      ++droppedNewBindings_;
+      return;
+    }
+    PeerBinding& binding = peerBindings_[peerBindingCount_];
+    binding.grutAddr = grutAddr;
+    binding.known = true;
+    std::memcpy(binding.mac, mac, sizeof(binding.mac));
+    binding.lastSeenMs = nowMs;
+    ++peerBindingCount_;
+    // Register immediately so a future sendToPeer() can reach it -
+    // matches the same "register before send" discipline already
+    // used for the broadcast peer in start(). Not fatal if it fails;
+    // sendToPeer() will simply fail too until conditions improve.
+    uint8_t macCopy[6];
+    std::memcpy(macCopy, mac, sizeof(macCopy));
+    esp_now_add_peer(macCopy, ESP_NOW_ROLE_COMBO, channel_, nullptr, 0);
+    return;
+  }
+
+  PeerBinding& binding = peerBindings_[idx];
+  const bool sameMac = std::memcmp(binding.mac, mac, sizeof(binding.mac)) == 0;
+
+  if (sameMac) {
+    // Case 2: same address, same MAC - just a heartbeat, refresh only.
+    binding.lastSeenMs = nowMs;
+    return;
+  }
+
+  const uint32_t age = nowMs - binding.lastSeenMs;
+  if (age <= kPeerBindingStaleAfterMs) {
+    // Case 3: a second MAC claims an address whose current binding is
+    // still fresh. Explicitly rejected - never silently hijacked.
+    ++addressMacConflicts_;
+    return;
+  }
+
+  // Case 4: current binding is stale - rebind allowed.
+  uint8_t oldMacCopy[6];
+  std::memcpy(oldMacCopy, binding.mac, sizeof(oldMacCopy));
+  esp_now_del_peer(oldMacCopy);
+
+  std::memcpy(binding.mac, mac, sizeof(binding.mac));
+  binding.lastSeenMs = nowMs;
+  ++rebinds_;
+
+  uint8_t newMacCopy[6];
+  std::memcpy(newMacCopy, mac, sizeof(newMacCopy));
+  esp_now_add_peer(newMacCopy, ESP_NOW_ROLE_COMBO, channel_, nullptr, 0);
+}
+
+bool EspNowDriver::lookupPeerMac(uint8_t grutAddr, uint8_t* outMac) const {
+  const int idx = findBindingIndex(grutAddr);
+  if (idx < 0) {
+    return false;
+  }
+  std::memcpy(outMac, peerBindings_[idx].mac, sizeof(peerBindings_[idx].mac));
+  return true;
+}
+
+size_t EspNowDriver::peerBindingCount() const {
+  return peerBindingCount_;
+}
+
+uint32_t EspNowDriver::droppedNewBindingCount() const {
+  return droppedNewBindings_;
+}
+
+uint32_t EspNowDriver::addressMacConflictCount() const {
+  return addressMacConflicts_;
+}
+
+uint32_t EspNowDriver::rebindCount() const {
+  return rebinds_;
+}
+
+bool EspNowDriver::sendToPeer(uint8_t nextHopAddr, const uint8_t* frameBytes,
+                              size_t frameLength) {
+  uint8_t mac[6];
+  if (!lookupPeerMac(nextHopAddr, mac)) {
+    return false;
+  }
+  if (!running_ || sendInFlight_ || !sendQueue_.empty()) {
+    return false;
+  }
+
+  uint8_t buffer[FrameQueue::kMaxFrameBytes];
+  if (frameLength > sizeof(buffer)) {
+    return false;
+  }
+  std::memcpy(buffer, frameBytes, frameLength);
+
+  sendInFlight_ = true;
+  sendInFlightStartMs_ = millis();
+  ++sendAttempted_;
+
+  const int result = esp_now_send(mac, buffer, static_cast<int>(frameLength));
+  if (result != 0) {
+    sendInFlight_ = false;
+    ++sendImmediateErrors_;
+    recordSendInFlightCleared(millis());
+  }
+  return result == 0;
+}
+
+void EspNowDriver::onReceive(uint8_t* macAddr, uint8_t* data,
                               uint8_t length) {
   // ADR 0005: minimal bounds validation (FrameQueue::push() itself
   // rejects anything over kMaxFrameBytes) + enqueue only. No parsing,
-  // no UART access here.
+  // no UART access here. Stage 5.0: macAddr is now preserved through
+  // the queue (previously discarded) so FrameReceiver can later learn
+  // which MAC a decoded GRUT address came from.
   if (g_activeDriver != nullptr) {
-    g_activeDriver->recvQueue_.push(data, length);
+    g_activeDriver->recvQueue_.push(data, length, macAddr);
   }
 }
 

@@ -105,8 +105,9 @@ void sendHeartbeat() {
 void processReceivedFrames(uint32_t nowMs) {
   uint8_t raw[grut::protocol::kMaxFrameSizeBytes];
   size_t rawLen = 0;
+  uint8_t sourceMac[6];
 
-  while (gEspNow.receive(raw, sizeof(raw), &rawLen)) {
+  while (gEspNow.receive(raw, sizeof(raw), &rawLen, sourceMac)) {
     grut::protocol::GrutFrameHeader header;
     uint8_t payload[grut::protocol::kMaxGrutPayloadBytes];
     size_t payloadLen = 0;
@@ -137,6 +138,7 @@ void processReceivedFrames(uint32_t nowMs) {
     }
 
     gNeighborTable.onFrameObserved(header.srcAddr, nowMs);
+    gEspNow.recordPeerBinding(header.srcAddr, sourceMac);
 
     if (header.srcAddr != grut::kPeerAddr) {
       continue;

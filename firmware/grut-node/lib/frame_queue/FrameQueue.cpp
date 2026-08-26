@@ -5,7 +5,8 @@
 namespace grut {
 namespace transport {
 
-bool FrameQueue::push(const uint8_t* frameBytes, size_t frameLength) {
+bool FrameQueue::push(const uint8_t* frameBytes, size_t frameLength,
+                      const uint8_t* mac) {
   if (count_ >= kDepth || frameLength > kMaxFrameBytes) {
     ++dropped_;
     return false;
@@ -14,11 +15,17 @@ bool FrameQueue::push(const uint8_t* frameBytes, size_t frameLength) {
   const size_t tail = (head_ + count_) % kDepth;
   std::memcpy(slots_[tail].bytes, frameBytes, frameLength);
   slots_[tail].length = frameLength;
+  if (mac != nullptr) {
+    std::memcpy(slots_[tail].mac, mac, kMacBytes);
+  } else {
+    std::memset(slots_[tail].mac, 0, kMacBytes);
+  }
   ++count_;
   return true;
 }
 
-bool FrameQueue::pop(uint8_t* outBuffer, size_t outCapacity, size_t* outLength) {
+bool FrameQueue::pop(uint8_t* outBuffer, size_t outCapacity, size_t* outLength,
+                     uint8_t* outMac) {
   if (count_ == 0) {
     return false;
   }
@@ -32,6 +39,9 @@ bool FrameQueue::pop(uint8_t* outBuffer, size_t outCapacity, size_t* outLength) 
 
   std::memcpy(outBuffer, slot.bytes, slot.length);
   *outLength = slot.length;
+  if (outMac != nullptr) {
+    std::memcpy(outMac, slot.mac, kMacBytes);
+  }
 
   head_ = (head_ + 1) % kDepth;
   --count_;

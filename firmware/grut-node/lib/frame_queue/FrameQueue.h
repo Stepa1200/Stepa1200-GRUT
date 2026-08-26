@@ -17,19 +17,34 @@ class FrameQueue {
  public:
   static constexpr size_t kDepth = 4;
   static constexpr size_t kMaxFrameBytes = 250;  // grut::protocol::kMaxFrameSizeBytes
+  static constexpr size_t kMacBytes = 6;
 
   FrameQueue() = default;
 
   // Returns false (and increments droppedCount()) if the queue is
   // already full or frameLength exceeds kMaxFrameBytes. Existing
   // queued frames are untouched either way.
-  bool push(const uint8_t* frameBytes, size_t frameLength);
+  //
+  // mac: optional, 6 bytes, stored alongside the frame if provided
+  // (nullptr means "not tracked" - existing callers are unaffected,
+  // this parameter defaults to nullptr precisely so no call site needs
+  // to change). Added for Stage 5.0 (multi-peer endpoint plumbing) so
+  // EspNowDriver's receive queue can preserve the ESP-NOW source MAC
+  // through to FrameReceiver, without FrameQueue itself knowing or
+  // caring what that MAC is used for.
+  bool push(const uint8_t* frameBytes, size_t frameLength,
+            const uint8_t* mac = nullptr);
 
   // Returns false if the queue is empty. On success, copies the
   // oldest queued frame's bytes into outBuffer (capacity outCapacity,
   // must be at least kMaxFrameBytes) and sets *outLength, then removes
   // it from the queue (FIFO order).
-  bool pop(uint8_t* outBuffer, size_t outCapacity, size_t* outLength);
+  //
+  // outMac: optional, 6 bytes, filled with whatever was passed to the
+  // matching push() (all zero if push() didn't provide one). nullptr
+  // means "caller doesn't care" - existing callers are unaffected.
+  bool pop(uint8_t* outBuffer, size_t outCapacity, size_t* outLength,
+           uint8_t* outMac = nullptr);
 
   size_t size() const;
   bool empty() const;
@@ -40,6 +55,7 @@ class FrameQueue {
   struct Slot {
     uint8_t bytes[kMaxFrameBytes] = {};
     size_t length = 0;
+    uint8_t mac[kMacBytes] = {};
   };
 
   Slot slots_[kDepth];

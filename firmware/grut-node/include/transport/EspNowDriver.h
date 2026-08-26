@@ -91,7 +91,12 @@ class EspNowDriver {
 
   // Pops one received raw frame, if any. Returns false if the receive
   // queue is empty.
-  bool receive(uint8_t* outBuffer, size_t outCapacity, size_t* outLength);
+  //
+  // outMac: optional, 6 bytes. Filled with the ESP-NOW source MAC of
+  // this frame if provided (Stage 5.0). nullptr means "caller doesn't
+  // need it" - existing callers are unaffected.
+  bool receive(uint8_t* outBuffer, size_t outCapacity, size_t* outLength,
+               uint8_t* outMac = nullptr);
 
   uint32_t droppedSendCount() const;
   uint32_t droppedReceiveCount() const;
@@ -132,6 +137,81 @@ class EspNowDriver {
   // How many completed sends took longer than
   // kSendInFlightObservationThresholdMs to clear.
   uint32_t sendInFlightOverThresholdCount() const;
+
+  // --- Stage 5.0: GRUT address -> ESP-NOW MAC endpoint plumbing. ---
+  //
+  // Transport (this class), not NeighborTable, owns this mapping -
+  // NeighborTable stays carrier-independent (see its header comment).
+  // FrameReceiver calls recordPeerBinding() once per successfully
+  // decoded frame, immediately after learning both the source MAC
+  // (from receive()'s outMac) and the GRUT address (from the decoded
+  // header) - this class never decodes GRUT frames itself.
+  //
+  // This is NOT authentication or security - it is deterministic
+  // endpoint ownership ahead of a future SecurityManager. A GRUT
+  // address is not allowed to be silently hijacked by a second MAC
+  // while its current binding is still fresh.
+  static constexpr size_t kMaxPeerBindings = 8;
+
+  // Same staleness horizon as NeighborTable::kDefaultStaleAfterMs -
+  // both answer "how long since we last heard from this address
+  // before we stop trusting what we knew about it", just applied to
+  // different data (visibility vs. delivery-critical MAC identity).
+  static constexpr uint32_t kPeerBindingStaleAfterMs = 5000;
+
+  // Policy v1 - deterministic, not a guess:
+  //  1. New GRUT address + MAC            -> binding created.
+  //  2. Existing address + SAME MAC       -> lastSeen refreshed.
+  //  3. Existing address + DIFFERENT MAC,
+  //     current binding still fresh       -> REJECTED. The existing
+  //     binding is left untouched; addressMacConflictCount() is
+  //     incremented. A fresh binding is never overwritten just
+  //     because a second MAC claims the same GRUT address.
+  //  4. Existing address + DIFFERENT MAC,
+  //     current binding is stale          -> rebind allowed;
+  //     rebindCount() is incremented.
+  // If the table is full and this is a genuinely new address,
+  // droppedNewBindingCount() is incremented and nothing is recorded -
+  // existing bindings are never evicted to make room (same philosophy
+  // as NeighborTable).
+  void recordPeerBinding(uint8_t grutAddr, const uint8_t* mac);
+
+  // True and fills outMac (6 bytes) if a binding currently exists for
+  // grutAddr - regardless of freshness (freshness is a recordPeerBinding()
+  // concern, not a lookup concern; a caller wanting a fresh MAC only
+  // should check age separately if that's ever needed).
+  bool lookupPeerMac(uint8_t grutAddr, uint8_t* outMac) const;
+
+  size_t peerBindingCount() const;
+  uint32_t droppedNewBindingCount() const;
+  uint32_t addressMacConflictCount() const;
+  uint32_t rebindCount() const;
+
+  // Sends to whatever MAC is currently bound to nextHopAddr. Returns
+  // false immediately - no queuing, no retry, no fallback guess - if
+  // no binding exists yet, or if a send is already in flight, or the
+  // driver is not running. This is deliberately as simple as
+  // sendBroadcastIfIdle(): a raw capability for a future Routing layer
+  // to call, not itself a scheduling or reliability policy. No route
+  // selection happens here or anywhere yet.
+  bool sendToPeer(uint8_t nextHopAddr, const uint8_t* frameBytes,
+                  size_t frameLength);
+
+ private:
+  struct PeerBinding {
+    uint8_t grutAddr = 0;
+    bool known = false;
+    uint8_t mac[6] = {};
+    uint32_t lastSeenMs = 0;
+  };
+
+  int findBindingIndex(uint8_t grutAddr) const;
+
+  PeerBinding peerBindings_[kMaxPeerBindings];
+  size_t peerBindingCount_ = 0;
+  uint32_t droppedNewBindings_ = 0;
+  uint32_t addressMacConflicts_ = 0;
+  uint32_t rebinds_ = 0;
 
  private:
   static void onSend(uint8_t* macAddr, uint8_t status);

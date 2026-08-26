@@ -40,8 +40,9 @@ FrameReceiver::FrameReceiver(EspNowDriver& espNow, UartTransport& uart,
 void FrameReceiver::poll() {
   uint8_t rawFrame[grut::protocol::kMaxFrameSizeBytes];
   size_t rawLen = 0;
+  uint8_t sourceMac[6];
 
-  while (espNow_.receive(rawFrame, sizeof(rawFrame), &rawLen)) {
+  while (espNow_.receive(rawFrame, sizeof(rawFrame), &rawLen, sourceMac)) {
     grut::protocol::GrutFrameHeader header;
     uint8_t payload[grut::protocol::kMaxGrutPayloadBytes];
     size_t payloadLen = 0;
@@ -53,6 +54,15 @@ void FrameReceiver::poll() {
       ++decodeFailures_;
       continue;  // corrupted/malformed - drop silently, no retransmission
     }
+
+    // Stage 5.0: report (GRUT address, MAC) to Transport's endpoint
+    // table for every successfully decoded frame, any type - this is
+    // the only place both pieces are available together (EspNowDriver
+    // knows the MAC but never decodes GRUT frames; this class decodes
+    // but previously discarded the MAC). FrameReceiver does not store
+    // or interpret the binding itself - see EspNowDriver::recordPeerBinding()
+    // for the actual conflict policy.
+    espNow_.recordPeerBinding(header.srcAddr, sourceMac);
 
     // sequence is node-wide and advances for every outbound GRUT frame,
     // regardless of packet type. Account for it before dispatching by type;
