@@ -1,0 +1,79 @@
+name: GRUT CI
+
+on:
+  push:
+    branches:
+      - "task/**"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  native-tests:
+    name: Native host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/grut-node/platformio.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install "platformio==6.1.19"
+
+      - name: Run native tests
+        working-directory: firmware/grut-node
+        run: pio test -e native
+
+  esp-builds:
+    name: ESP target builds
+    runs-on: ubuntu-latest
+    needs: native-tests
+    strategy:
+      matrix:
+        env:
+          - esp8285-air1
+          - esp8285-air2
+          - esp8285-ground
+          - esp8285-ground-linkdiag
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/grut-node/platformio.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install "platformio==6.1.19"
+
+      # config/local_bridge_config.h is intentionally gitignored (it
+      # holds real hardware MAC addresses - see its .example header
+      # comment). CI only needs a BUILD-TESTED result, not real MACs,
+      # so the all-zero example config is sufficient here. This step
+      # must never be treated as a source of real deployment config.
+      - name: Provide CI-safe local bridge config
+        working-directory: firmware/grut-node
+        run: cp config/local_bridge_config.h.example config/local_bridge_config.h
+
+      - name: Build ${{ matrix.env }}
+        working-directory: firmware/grut-node
+        run: pio run -e ${{ matrix.env }}
