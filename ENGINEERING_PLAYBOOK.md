@@ -104,21 +104,25 @@ authoritative in:
 - `docs/ADR/0005-transport-frame-pipeline-and-bios-freeze.md`
 - `docs/ADR/0006-esp-now-driver-design.md`
 - `docs/ADR/0007-link-manager-v1.md`
+- `docs/ADR/0008-hello-discovery-and-data-source-safety-gate.md`
+- `docs/ADR/0009-endpoint-conflict-policy-v1.md`
+- `docs/ADR/0010-route-policy-v1.md`
 
 If an implementation task appears to require restating one of these
 facts, link the ADR instead of copying its content. If an ADR is
-missing for a decision that clearly changed architecture (this has
-happened before — see Section 4a), write the ADR before or alongside
-the implementation, not after the fact from memory.
+missing for a decision that clearly changed architecture, write the
+ADR before or alongside the implementation, not after the fact from
+memory — see the note below on how the previous gap was closed.
 
-## 4a. Known gap
+## 4a. Resolved gap (informational)
 
-As of this document's adoption, the following implemented decisions do
-not yet have a dedicated ADR and should receive one:
-
-- HELLO discovery subtype + DATA-source safety gate (Stage 4.2)
-- Endpoint conflict policy v1 (Stage 5.0)
-- Route policy v1 (Stage 5.1)
+As of this document's original adoption, three implemented decisions
+lacked a dedicated ADR: HELLO discovery + DATA-source safety gate
+(Stage 4.2), endpoint conflict policy v1 (Stage 5.0), and route policy
+v1 (Stage 5.1). These are now documented in ADR 0008, 0009, and 0010
+respectively (Issue #2). This subsection is kept only as a record that
+the process caught and closed its own documentation debt; remove it
+entirely once it no longer serves that purpose.
 
 # 5. Debugging method
 

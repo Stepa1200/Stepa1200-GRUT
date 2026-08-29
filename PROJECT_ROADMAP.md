@@ -105,9 +105,14 @@ Expose direct-neighbor state in dedicated diagnostic firmware.
 ### Stage 4.2 — HELLO discovery + DATA-source safety gate
 
 - HELLO control subtype discovers multiple nodes.
-- discovery must not authorize DATA automatically.
-- multiple MAVLink byte streams must never be merged into one UART
-  stream.
+- discovery does not by itself grant DATA authorization.
+- the gate authorizes `kData` frames by GRUT `srcAddr` only
+  (`srcAddr == grut::kPeerAddr`): DATA from a different GRUT address
+  is rejected before reaching UART.
+- this is not MAC authentication or security — two senders using the
+  same authorized GRUT `srcAddr` cannot currently be distinguished by
+  this gate. See `docs/ADR/0008-hello-discovery-and-data-source-safety-gate.md`
+  for the full limitation.
 
 ### Exit criteria
 
@@ -148,6 +153,18 @@ Transport owns carrier endpoints; NeighborTable remains MAC-agnostic.
 
 Two real AIR nodes can maintain two stable address<->MAC bindings
 simultaneously and independently age/recover.
+
+### Evidence boundary
+
+**Hardware-verified:** multiple distinct bindings coexisting,
+independent aging, and same-address/same-MAC refresh (policy cases 1
+and 2).
+
+**Host/behavioral-test only, not yet hardware-exercised:** the
+fresh-same-address/different-MAC rejection case and the
+stale-same-address/different-MAC rebind case (policy cases 3 and 4).
+Do not treat every conflict-policy branch as hardware-verified — see
+`docs/ADR/0009-endpoint-conflict-policy-v1.md` for the exact split.
 
 ---
 
@@ -198,7 +215,7 @@ RouteTable's own behavior specifically (see Stage 5.2 below, which
 
 ### Stage 5.2 — Direct routes in runtime
 
-**Status:** IMPLEMENTED + BUILD-TESTED, NOT HARDWARE-VERIFIED
+**Status:** HARDWARE-VERIFIED
 
 ### Goal
 
@@ -218,23 +235,39 @@ heard neighbor now creates/refreshes a direct route via
 diagnostic visibility, following the same pattern as `NEIGHBOR` and
 `BINDING`.
 
-A real behavioral test against the actual `link_diag_main.cpp` code
-(simulating two distinct source addresses) confirmed both direct
-routes appear simultaneously in the diagnostic output. This has **not**
-been reproduced by flashing real hardware yet — that is the specific
-remaining step before this can be called HARDWARE-VERIFIED.
+Hardware-verified on real AIR1+AIR2+GROUND hardware (GitHub Issue #1):
+
+- both direct routes (`ROUTE dest=1 nextHop=1 hop=1` and
+  `ROUTE dest=3 nextHop=3 hop=1`) observed simultaneously
+- `age` refreshes independently per route
+- powering AIR2 off: AIR1's route remains stable; AIR2's route ages
+  without being evicted (no silent removal)
+- powering AIR2 back on: its route refreshes correctly, with the
+  endpoint table (ADR 0009) showing `conflicts=0`/`rebinds=0` for the
+  same-MAC recovery
+- no forwarding, relay, or mesh behavior was introduced or exercised
+
+This verification covers only the direct-route case that the current
+runtime wiring can produce (`destination == nextHop`, `hopCount == 1`).
+`RouteTable`'s competing-next-hop policy (Stage 5.1's cases 3–5 — see
+`docs/ADR/0010-route-policy-v1.md`) has no runtime producer yet and
+remains BUILD-TESTED only; do not treat this Stage 5.2 hardware result
+as verifying those cases too.
 
 ### Exit criteria
 
 - direct routes appear/disappear or become stale deterministically
-  — **BUILD-TESTED, pending hardware confirmation**
+  — **HARDWARE-VERIFIED** (Issue #1)
 - diagnostic firmware can show them — **done** (`ROUTE` line)
 - routing still does not forward foreign frames — **true by
   construction; no forwarding code exists**
-- existing direct bridge remains unaffected — **BUILD-TESTED**
-  (regression suite + safety-gate check both pass); real-hardware
-  regression check (Mission Planner quality) still recommended before
-  calling this stage closed
+- existing production UART<->ESP-NOW bridge remains unaffected —
+  **BUILD-TESTED** by regression/build evidence (Stage 5.2's own
+  native tests and all four ESP builds). Issue #1 used
+  `esp8285-ground-linkdiag`, which explicitly does not run the
+  UART<->ESP-NOW bridge — a separate Mission Planner/production-bridge
+  hardware regression check was not part of Issue #1 and remains
+  outstanding.
 
 ---
 

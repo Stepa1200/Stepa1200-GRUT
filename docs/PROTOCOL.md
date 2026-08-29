@@ -61,7 +61,7 @@ field-by-field by `FrameCodec`, never memcpy'd as a raw struct.
 |-------|-------------|---------|
 | `0x01`| `kData`     | An opaque chunk of the UART byte stream. No relationship to MAVLink message boundaries - see [UART as an opaque byte stream](#uart-as-an-opaque-byte-stream). |
 | `0x02`| `kHeartbeat`| Empty heartbeat frame used by LinkManager supervision. |
-| `0x03`| `kControl`  | Control/management frame. LINK_STATS v1 is the first formal payload subtype. |
+| `0x03`| `kControl`  | Control/management frame. `LINK_STATS` (`0x01`) and `HELLO` (`0x02`) are the formal payload subtypes defined so far. |
 
 ## Flags
 
@@ -75,7 +75,7 @@ broadcast address), and even that is not enforced by the codec.
 |------|--------------------|---------|
 | 0x01 | `kFlagAckRequested`| Reserved. Acknowledgement/retransmission is out of scope for v0.2.0 (ADR 0005). |
 | 0x02 | `kFlagFragment`    | Reserved. General-purpose fragmentation/reassembly of logical messages larger than one frame is out of scope for v0.2.0 (ADR 0005). |
-| 0x04 | `kFlagBroadcast`   | Informational: frame's `dstAddr` is `kBroadcastAddress`. |
+| 0x04 | `kFlagBroadcast`   | Informational: frame's `dstAddr` is `kBroadcastAddress`. Set by HELLO (see below); not enforced by the codec for any packet type. |
 
 ## Addressing
 
@@ -162,6 +162,49 @@ Compatibility: this formalizes the previously ad-hoc `kControl` statistics
 payload without changing the GRUT frame header, CRC, or protocol version.
 An older peer will ignore the new control payload, but AIR and GROUND should
 run matching firmware so both sides expose the same LinkManager semantics.
+
+### HELLO discovery payload v1
+
+The second formal `kControl` subtype is `HELLO` (`subtype = 0x02`). It
+announces this node's presence for neighbor discovery. HELLO frames
+are broadcast (`dstAddr = kBroadcastAddress`, `kFlagBroadcast` set)
+and, like all control frames, are never forwarded to the opaque UART
+byte stream.
+
+HELLO's own subtype-specific handling is discovery-only: decoding a
+HELLO payload confirms nothing beyond "this is a well-formed HELLO."
+Separately, the *enclosing* GRUT frame - any valid frame of any type,
+not only HELLO - already feeds generic observation state on receipt:
+`NeighborTable` (who is directly visible), the GRUT-address-to-ESP-NOW-
+MAC endpoint binding table, and direct-route population in
+`RouteTable`. HELLO's practical role is to give a node something to
+send when it has no other traffic yet, so that generic observation
+pipeline has a frame to observe even before any DATA or heartbeat
+exists between two nodes.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 1 | control subtype = `0x02` (`HELLO`) |
+
+Total payload size: **1 byte**; serialized GRUT frame size: **12 bytes**
+(9-byte header + 1-byte payload + 2-byte CRC).
+
+Sender identity is not duplicated inside the payload - it comes from
+the enclosing frame header's `srcAddr`, the same field every other
+GRUT frame already carries. HELLO carries no other field by design.
+
+Compatibility: this is a second, additive `kControl` subtype alongside
+`LINK_STATS` (`0x01`) - it does not change the GRUT frame header, CRC,
+or protocol version. A receiver that does not recognize subtype `0x02`
+simply fails to decode it as anything meaningful (for example,
+`LinkStatsCodec::decodeLinkStats()` rejects it on length/subtype
+mismatch); it does not misinterpret it as a different, valid payload.
+
+Discovery (who is visible) and DATA-source authorization (whose bytes
+reach UART) are two separate decisions - being discovered via HELLO
+does not by itself authorize a node's `kData` frames onto UART. See
+`docs/ADR/0008-hello-discovery-and-data-source-safety-gate.md` for the
+full design rationale.
 
 ### Sequence compatibility note
 
