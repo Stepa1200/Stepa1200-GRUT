@@ -275,18 +275,43 @@ as verifying those cases too.
 
 **Status:** NOT YET
 
+### Stage 6.0 — Relay v1 semantics (design)
+
+**Status:** DESIGN ACCEPTED (`docs/ADR/0011-relay-semantics-v1.md`) —
+Stage 6 implementation is still NOT YET. No `RelayEngine`, forwarding
+code, or firmware/source change exists yet: `RelayEngine` is NOT
+IMPLEMENTED, relay is not BUILD-TESTED, and relay is not
+HARDWARE-VERIFIED. See the ADR for the full accepted semantics and the
+required future implementation changes it records.
+
 ### Goal
 
 Forward a GRUT frame whose final destination is another node via a
 selected next hop.
 
-### Required design work before code
+### Accepted Stage 6.0 design boundary
 
-GRUT wire protocol may need explicit forwarding semantics such as
-destination, next-hop-independent addressing, TTL/hop limit, and
-authenticated routing metadata.
+Stage 6.0 is DESIGN ACCEPTED (`docs/ADR/0011-relay-semantics-v1.md`).
+The design boundary it establishes:
 
-Any wire-format change requires:
+- `kRoutedData` (proposed `PacketType`, not yet added to
+  `GrutProtocol.h`) is the routed unicast DATA discriminator; legacy
+  `kData` is never relay-eligible.
+- `dstAddr` is the final GRUT destination for `kRoutedData`; `nextHop`
+  remains local routing metadata, never serialized onto the wire.
+- `ttl` is active only for `kRoutedData` relay forwarding, never at the
+  true final destination and never for `kData`.
+- `srcAddr` is hop-local (previous-hop transmitter) for `kRoutedData`
+  specifically.
+- Relay-ingress authorization is deterministic configuration
+  (`RelayIngressFilter`), not cryptographic authentication.
+- Route advertisement, dynamic routing, and mesh remain **NOT YET**
+  (Stage 7).
+- `RelayEngine` implementation remains **NOT YET** — no forwarding code,
+  no firmware/source change, not BUILD-TESTED, not HARDWARE-VERIFIED.
+
+Any wire-format change beyond the above (e.g. actually adding
+`kRoutedData` to `GrutProtocol.h`) still requires:
 
 - compatibility analysis
 - protocol version impact analysis
